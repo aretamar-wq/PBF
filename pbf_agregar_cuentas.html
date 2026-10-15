@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PBF BASE24 - Agregar cuentas</title>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; max-width: 820px; margin: 20px auto; padding: 0 16px; color: #222; }
+  h1 { font-size: 1.3em; }
+  fieldset { border: 1px solid #bbb; border-radius: 6px; margin: 12px 0; }
+  label { display: block; margin: 6px 0; }
+  label span { display: inline-block; width: 270px; }
+  input[type=text] { width: 140px; padding: 3px; }
+  button { padding: 8px 18px; font-size: 1em; cursor: pointer; }
+  pre { background: #f4f4f4; border: 1px solid #ccc; padding: 10px; white-space: pre-wrap; min-height: 120px; }
+  .error { color: #b00020; font-weight: bold; }
+  .ok { color: #1b6e20; font-weight: bold; }
+</style>
+</head>
+<body>
+<h1>PBF BASE24 - Agregar cuentas nuevas (pesos y dólares)</h1>
+<p>Funciona sin instalar nada: todo se procesa en este navegador, el archivo no se envía a ningún lado.</p>
+
+<fieldset>
+  <legend>Archivo</legend>
+  <label><span>Archivo PBF de entrada:</span> <input type="file" id="archivo"></label>
+</fieldset>
+
+<fieldset>
+  <legend>Parámetros</legend>
+  <label><span>Cuentas a agregar por moneda:</span> <input type="text" id="cantidad" value="100000"></label>
+  <label><span>Cuenta inicial (vacío = automática):</span> <input type="text" id="inicial"></label>
+  <label><span>Umbral de serie (fuera de serie &gt;=):</span> <input type="text" id="umbral" value="1000000"></label>
+  <label><span>Fecha header (AAMMDD):</span> <input type="text" id="fh"></label>
+  <label><span>Fecha detalle (AAMMDD):</span> <input type="text" id="fd"></label>
+  <label><span>Nombre del archivo de salida:</span> <input type="text" id="salida" style="width:300px"></label>
+</fieldset>
+
+<button id="btn">Procesar y descargar</button>
+<p id="estado"></p>
+<pre id="log"></pre>
+
+<script>
+// ==NUCLEO==
+// Lógica equivalente a pbf_agregar_cuentas.py (sin dependencias del DOM).
+const LONG = 116;
+const GRUPO_PESOS = "0010500";
+const GRUPO_DOLARES = "0010502";
+
+// Overpunch: { A-I = positivo 0-9 ; } J-R = negativo 0-9
+const POS = "{ABCDEFGHI";
+const NEG = "}JKLMNOPQR";
+
+function pad(n, ancho) { return String(n).padStart(ancho, "0"); }
+
+// Zoned decimal (overpunch) -> BigInt con signo (BigInt: los totales superan 2^53)
+function decodificarZoned(campo) {
+  const ult = campo[campo.length - 1];
+  const cuerpo = campo.slice(0, -1);
+  let signo = 1n, d;
+  if (POS.includes(ult)) d = POS.indexOf(ult);
+  else if (NEG.includes(ult)) { d = NEG.indexOf(ult); signo = -1n; }
+  else if (/\d/.test(ult)) d = Number(ult);
+  else throw new Error("campo zoned inválido: '" + campo + "'");
+  if (cuerpo && !/^\d+$/.test(cuerpo)) throw new Error("campo zoned inválido: '" + campo + "'");
+  return signo * BigInt((cuerpo || "0") + String(d));
+}
+
+function codificarZoned(valor, ancho) {
+  const s = (valor < 0n ? -valor : valor).toString().padStart(ancho, "0");
+  if (s.length > ancho) throw new Error("el valor " + valor + " no entra en " + ancho + " posiciones");
+  const tabla = valor < 0n ? NEG : POS;
+  return s.slice(0, -1) + tabla[Number(s[s.length - 1])];
+}
+
+// Registro nuevo de detalle (secuencia provisoria 0000000, se renumera luego)
+function armarDetalle(moneda, tipo, cuenta, fechaDetalle) {
+  const r = "0116" + "0000000" + "0312" + "00105" + moneda + pad(cuenta, 11) + " " + tipo + "IF"
+    + "00000000000{00000000000{000000000000000000000099000000000000"
+    + fechaDetalle + "0000000000  ";
+  if (r.length !== LONG) throw new Error("registro generado de largo " + r.length + " (esperado " + LONG + ")");
+  return r;
+}
+
+function procesar(texto, op) {
+  const out = []; // líneas del resumen
+  if (texto.length === 0 || texto.length % LONG !== 0)
+    throw new Error("el tamaño del archivo (" + texto.length + ") no es múltiplo de " + LONG);
+  if (/[\r\n]/.test(texto))
+    throw new Error("el archivo contiene saltos de línea; se esperaba todo concatenado");
+
+  // 1. Separar en registros y validar estructura
+  const regs = [];
+  for (let i = 0; i < texto.length; i += LONG) regs.push(texto.substr(i, LONG));
+  if (regs.length < 4) throw new Error("el archivo tiene menos de 4 registros");
+  if (regs[0].substr(7, 2) !== "FH") throw new Error("el primer registro no es FH");
+  if (regs[1].substr(7, 2) !== "BH") throw new Error("el segundo registro no es BH");
+  const bt = regs[regs.length - 2], ft = regs[regs.length - 1];
+  if (bt.substr(7, 2) !== "BT") throw new Error("el anteúltimo registro no es BT");
+  if (ft.substr(7, 2) !== "FT") throw new Error("el último registro no es FT");
+  const fh = regs[0], bh = regs[1];
+  const detalles = regs.slice(2, -2);
+  detalles.forEach((r, i) => {
+    if (!r.startsWith("0116")) throw new Error("el registro " + (i + 3) + " no es de detalle (no empieza con 0116)");
+  });
+  if (Number(bt.substr(25, 7)) !== detalles.length)
+    throw new Error("BT declara " + bt.substr(25, 7) + " detalles y hay " + detalles.length);
+  if (Number(ft.substr(9, 7)) !== detalles.length)
+    throw new Error("FT declara " + ft.substr(9, 7) + " detalles y hay " + detalles.length);
+  let totalEntrada = 0n;
+  for (const r of detalles) totalEntrada += decodificarZoned(r.substr(50, 12));
+  try {
+    const totalBt = decodificarZoned(bt.substr(9, 16));
+    if (totalBt !== totalEntrada)
+      out.push("ADVERTENCIA: total BT de entrada (" + totalBt + ") != suma de saldos (" + totalEntrada + ")");
+  } catch (e) {
+    out.push("ADVERTENCIA: total BT de entrada ilegible: '" + bt.substr(9, 16) + "'");
+  }
+
+  // 2. Cuenta inicial, ignorando cuentas fuera de serie
+  let maxP = null, maxD = null;
+  const fueraDeSerie = [];
+  for (const r of detalles) {
+    const g = r.substr(15, 7);
+    if (g !== GRUPO_PESOS && g !== GRUPO_DOLARES) continue;
+    const cta = Number(r.substr(22, 11));
+    if (cta >= op.umbral) { fueraDeSerie.push([g, cta]); continue; }
+    if (g === GRUPO_PESOS) { if (maxP === null || cta > maxP) maxP = cta; }
+    else if (maxD === null || cta > maxD) maxD = cta;
+  }
+  let inicio;
+  if (op.cuentaInicial !== null) inicio = op.cuentaInicial;
+  else {
+    const maximos = [maxP, maxD].filter(m => m !== null);
+    if (maximos.length === 0) throw new Error("no hay cuentas en los grupos 0010500/0010502; indique la cuenta inicial");
+    inicio = Math.max(...maximos) + 1;
+  }
+  const fin = inicio + op.cantidad - 1;
+  if (inicio < 0 || fin > 99999999999) throw new Error("rango de cuentas fuera de 11 dígitos: " + inicio + "-" + fin);
+
+  // 3. Generar cuentas nuevas. Se trabaja con la "cola" del registro (desde la
+  // posición 12), que empieza con la clave: ordenar colas = ordenar por clave.
+  const colasNuevas = [];
+  for (let c = inicio; c <= fin; c++) colasNuevas.push(armarDetalle("00", "11", c, op.fechaDetalle).slice(11));
+  for (let c = inicio; c <= fin; c++) colasNuevas.push(armarDetalle("02", "15", c, op.fechaDetalle).slice(11));
+
+  // 4. Duplicados
+  const colasExist = detalles.map(r => r.slice(11));
+  const clavesExist = new Set(colasExist.map(t => t.slice(0, 25)));
+  const clavesNuevas = new Set(colasNuevas.map(t => t.slice(0, 25)));
+  if (clavesNuevas.size !== colasNuevas.length) throw new Error("claves nuevas repetidas entre sí");
+  const dup = [];
+  for (const k of clavesNuevas) if (clavesExist.has(k)) dup.push(k);
+  if (dup.length) throw new Error("claves duplicadas (" + dup.length + " ya existen en el archivo). Ejemplos: " + dup.slice(0, 5).join(" | "));
+
+  // 5. Unir y ordenar (un solo sort; el orden por defecto compara por código ASCII)
+  const todas = colasExist.concat(colasNuevas);
+  todas.sort();
+
+  // 6-7. Renumerar y recalcular totales
+  const pos = { "00": [null, null], "02": [null, null] };
+  let total = 0n, claveAnt = null;
+  const salidaRegs = new Array(todas.length + 4);
+  const colasViejasSalida = [];
+  todas.forEach((t, i) => {
+    const nro = i + 3;
+    const clave = t.slice(0, 25);
+    if (claveAnt !== null && !(claveAnt < clave))
+      throw new Error("claves fuera de orden o repetidas: '" + claveAnt + "' >= '" + clave + "'");
+    claveAnt = clave;
+    if (clavesNuevas.has(clave)) {
+      const rango = pos[t.substr(9, 2)];
+      if (rango[0] === null) rango[0] = nro;
+      rango[1] = nro;
+    } else colasViejasSalida.push(t);
+    total += decodificarZoned(t.substr(39, 12));   // saldo 2 (pos. 51-62)
+    salidaRegs[i + 2] = "0116" + pad(nro, 7) + t;
+  });
+  const n = todas.length;
+
+  // 8. Header y trailers. El total del BT conserva el formato de la entrada.
+  salidaRegs[0] = pad(1, 7) + fh.substr(7, 9) + op.fechaHeader + fh.slice(22);
+  salidaRegs[1] = pad(2, 7) + bh.slice(7);
+  const totalTxt = (/\d/.test(bt[24]) && total >= 0n) ? total.toString().padStart(16, "0") : codificarZoned(total, 16);
+  salidaRegs[n + 2] = pad(n + 3, 7) + bt.substr(7, 2) + totalTxt + pad(n, 7) + bt.slice(32);
+  salidaRegs[n + 3] = pad(n + 4, 7) + ft.substr(7, 2) + pad(n, 7) + ft.slice(16);
+
+  // Validaciones finales
+  if (!salidaRegs.every(r => r.length === LONG)) throw new Error("hay registros que no miden 116");
+  const originales = colasExist.slice().sort();
+  if (originales.length !== colasViejasSalida.length || originales.some((t, i) => t !== colasViejasSalida[i]))
+    throw new Error("los registros originales no se conservaron intactos");
+
+  // Resumen
+  const f = v => v === null ? "ninguna" : String(v);
+  out.push("Archivo de entrada: " + regs.length + " registros, " + detalles.length + " detalles");
+  out.push("Cuenta más alta pesos   (0010500): " + f(maxP));
+  out.push("Cuenta más alta dólares (0010502): " + f(maxD));
+  if (fueraDeSerie.length) {
+    out.push("ADVERTENCIA - cuentas fuera de serie ignoradas (>= " + op.umbral + "), dejadas sin modificar:");
+    fueraDeSerie.forEach(([g, c]) => out.push("    grupo " + g + " cuenta " + c));
+  } else out.push("Cuentas fuera de serie ignoradas: ninguna");
+  out.push("Rango generado: " + inicio + " a " + fin + " (" + op.cantidad + " cuentas por moneda, " + colasNuevas.length + " registros nuevos)");
+  out.push("Pesos   nuevos: registros " + pos["00"][0] + " a " + pos["00"][1]);
+  out.push("Dólares nuevos: registros " + pos["02"][0] + " a " + pos["02"][1]);
+  out.push("Total de detalles: " + n);
+  out.push("BT: detalles=" + pad(n, 7) + " total saldos=" + totalTxt + " (" + total + ")");
+  out.push("FT: detalles=" + pad(n, 7));
+  return { salida: salidaRegs.join(""), resumen: out };
+}
+// ==FIN NUCLEO==
+
+// ---- Interfaz ----
+const $ = id => document.getElementById(id);
+const aammdd = d => String(d.getFullYear()).slice(2) + pad(d.getMonth() + 1, 2) + pad(d.getDate(), 2);
+const hoy = new Date(), ayer = new Date(Date.now() - 86400000);
+$("fh").value = aammdd(hoy);
+$("fd").value = aammdd(ayer);
+
+$("archivo").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (f) $("salida").value = f.name + "_out";
+});
+
+function mostrar(msg, clase) {
+  $("estado").className = clase || "";
+  $("estado").textContent = msg;
+}
+
+$("btn").addEventListener("click", async () => {
+  $("log").textContent = "";
+  try {
+    const f = $("archivo").files[0];
+    if (!f) throw new Error("elegí el archivo PBF de entrada");
+    const entero = (id, nombre) => {
+      const v = $(id).value.trim();
+      if (!/^\d+$/.test(v)) throw new Error(nombre + " debe ser un número entero");
+      return Number(v);
+    };
+    const fecha = (id, nombre) => {
+      const v = $(id).value.trim();
+      if (!/^\d{6}$/.test(v)) throw new Error(nombre + " debe ser AAMMDD (6 dígitos)");
+      return v;
+    };
+    const op = {
+      cantidad: entero("cantidad", "Cuentas a agregar"),
+      umbral: entero("umbral", "Umbral de serie"),
+      cuentaInicial: $("inicial").value.trim() === "" ? null : entero("inicial", "Cuenta inicial"),
+      fechaHeader: fecha("fh", "Fecha header"),
+      fechaDetalle: fecha("fd", "Fecha detalle"),
+    };
+    if (op.cantidad < 1) throw new Error("Cuentas a agregar debe ser >= 1");
+
+    mostrar("Procesando...");
+    await new Promise(r => setTimeout(r, 30));   // deja repintar antes de bloquear
+
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    for (let i = 0; i < bytes.length; i++)
+      if (bytes[i] > 127) throw new Error("el archivo tiene caracteres no ASCII (byte " + i + ")");
+    let texto = "";
+    for (let i = 0; i < bytes.length; i += 65536)
+      texto += String.fromCharCode.apply(null, bytes.subarray(i, i + 65536));
+
+    const res = procesar(texto, op);
+    const outBytes = new Uint8Array(res.salida.length);
+    for (let i = 0; i < res.salida.length; i++) outBytes[i] = res.salida.charCodeAt(i);
+
+    const nombre = $("salida").value.trim() || (f.name + "_out");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([outBytes], { type: "application/octet-stream" }));
+    a.download = nombre;
+    document.body.appendChild(a); a.click(); a.remove();
+
+    $("log").textContent = res.resumen.join("\n") + "\nSalida: " + nombre + " (" + outBytes.length + " bytes)";
+    mostrar("Listo: archivo generado y descargado.", "ok");
+  } catch (e) {
+    mostrar("ERROR: " + e.message, "error");
+  }
+});
+</script>
+</body>
+</html>
