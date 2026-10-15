@@ -107,14 +107,29 @@ function procesar(texto, op) {
     throw new Error("BT declara " + bt.substr(25, 7) + " detalles y hay " + detalles.length);
   if (Number(ft.substr(9, 7)) !== detalles.length)
     throw new Error("FT declara " + ft.substr(9, 7) + " detalles y hay " + detalles.length);
-  let totalEntrada = 0n;
-  for (const r of detalles) totalEntrada += decodificarZoned(r.substr(50, 12));
-  try {
-    const totalBt = decodificarZoned(bt.substr(9, 16));
-    if (totalBt !== totalEntrada)
-      out.push("ADVERTENCIA: total BT de entrada (" + totalBt + ") != suma de saldos (" + totalEntrada + ")");
-  } catch (e) {
-    out.push("ADVERTENCIA: total BT de entrada ilegible: '" + bt.substr(9, 16) + "'");
+  // AMT del BT de entrada vs. suma de LEDG-BAL. Un LEDG-BAL desbordado (12 dígitos
+  // sin overpunch) perdió su último carácter: no se suma; su importe real está
+  // entre X*10 y X*10+9 (X = valor de los 12 dígitos).
+  let amtBt;
+  try { amtBt = decodificarZoned(bt.substr(9, 16)); }
+  catch (e) { throw new Error("el AMT del BT de entrada es ilegible: '" + bt.substr(9, 16) + "'"); }
+  let sumaValidos = 0n, sumaX = 0n;
+  const desbordados = [];
+  detalles.forEach((r, i) => {
+    const campo = r.substr(50, 12);
+    if (/^\d+$/.test(campo)) {
+      sumaX += BigInt(campo);
+      desbordados.push([i + 3, r.substr(15, 7), r.substr(22, 11), r.substr(33, 3).trim(), campo]);
+    } else sumaValidos += decodificarZoned(campo);
+  });
+  const resto = amtBt - sumaValidos;
+  if (desbordados.length === 0) {
+    if (resto !== 0n) throw new Error("AMT del BT (" + amtBt + ") != suma de los LEDG-BAL (" + sumaValidos + ")");
+  } else {
+    const minimo = sumaX * 10n, maximo = minimo + 9n * BigInt(desbordados.length);
+    if (resto < minimo || resto > maximo)
+      throw new Error("AMT del BT (" + amtBt + ") - suma de LEDG-BAL válidos (" + sumaValidos + ") = " + resto
+        + ", fuera del rango [" + minimo + ", " + maximo + "] que explican los " + desbordados.length + " desbordados");
   }
 
   // 2. Cuenta inicial, ignorando cuentas fuera de serie
@@ -159,7 +174,7 @@ function procesar(texto, op) {
 
   // 6-7. Renumerar y recalcular totales
   const pos = { "00": [null, null], "02": [null, null] };
-  let total = 0n, claveAnt = null;
+  let claveAnt = null;
   const salidaRegs = new Array(todas.length + 4);
   const colasViejasSalida = [];
   todas.forEach((t, i) => {
@@ -173,20 +188,20 @@ function procesar(texto, op) {
       if (rango[0] === null) rango[0] = nro;
       rango[1] = nro;
     } else colasViejasSalida.push(t);
-    total += decodificarZoned(t.substr(39, 12));   // saldo 2 (pos. 51-62)
     salidaRegs[i + 2] = "0116" + pad(nro, 7) + t;
   });
   const n = todas.length;
 
-  // 8. Header y trailers. El total del BT conserva el formato de la entrada.
+  // 8. Header y trailers. El AMT del BT NO se recalcula: las cuentas nuevas tienen
+  // saldo cero, así que se copia tal cual (mismo ancho) desde el BT de entrada.
   salidaRegs[0] = pad(1, 7) + fh.substr(7, 9) + op.fechaHeader + fh.slice(22);
   salidaRegs[1] = pad(2, 7) + bh.slice(7);
-  const totalTxt = (/\d/.test(bt[24]) && total >= 0n) ? total.toString().padStart(16, "0") : codificarZoned(total, 16);
-  salidaRegs[n + 2] = pad(n + 3, 7) + bt.substr(7, 2) + totalTxt + pad(n, 7) + bt.slice(32);
+  salidaRegs[n + 2] = pad(n + 3, 7) + bt.substr(7, 2) + bt.substr(9, 16) + pad(n, 7) + bt.slice(32);
   salidaRegs[n + 3] = pad(n + 4, 7) + ft.substr(7, 2) + pad(n, 7) + ft.slice(16);
 
   // Validaciones finales
   if (!salidaRegs.every(r => r.length === LONG)) throw new Error("hay registros que no miden 116");
+  if (salidaRegs[n + 2].substr(9, 16) !== bt.substr(9, 16)) throw new Error("el AMT del BT de salida difiere del de entrada");
   const originales = colasExist.slice().sort();
   if (originales.length !== colasViejasSalida.length || originales.some((t, i) => t !== colasViejasSalida[i]))
     throw new Error("los registros originales no se conservaron intactos");
@@ -200,11 +215,16 @@ function procesar(texto, op) {
     out.push("ADVERTENCIA - cuentas fuera de serie ignoradas (>= " + op.umbral + "), dejadas sin modificar:");
     fueraDeSerie.forEach(([g, c]) => out.push("    grupo " + g + " cuenta " + c));
   } else out.push("Cuentas fuera de serie ignoradas: ninguna");
+  if (desbordados.length) {
+    out.push("ADVERTENCIA - LEDG-BAL desbordados (12 dígitos sin overpunch), no sumados y copiados sin cambios; conviene revisarlos con el sistema de origen:");
+    desbordados.forEach(([nro, g, c, t, campo]) =>
+      out.push("    registro " + nro + "  cuenta " + g + " " + c + "  tipo " + t + "  LEDG-BAL '" + campo + "'"));
+  }
   out.push("Rango generado: " + inicio + " a " + fin + " (" + op.cantidad + " cuentas por moneda, " + colasNuevas.length + " registros nuevos)");
   out.push("Pesos   nuevos: registros " + pos["00"][0] + " a " + pos["00"][1]);
   out.push("Dólares nuevos: registros " + pos["02"][0] + " a " + pos["02"][1]);
   out.push("Total de detalles: " + n);
-  out.push("BT: detalles=" + pad(n, 7) + " total saldos=" + totalTxt + " (" + total + ")");
+  out.push("BT: detalles=" + pad(n, 7) + " AMT=" + bt.substr(9, 16) + " (copiado sin cambios del BT de entrada)");
   out.push("FT: detalles=" + pad(n, 7));
   return { salida: salidaRegs.join(""), resumen: out };
 }

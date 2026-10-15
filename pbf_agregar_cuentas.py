@@ -85,7 +85,11 @@ def leer_registros(ruta):
 
 
 def validar_entrada(regs):
-    """Valida estructura FH, BH, detalles, BT, FT y contadores. Devuelve detalles."""
+    """Valida estructura FH, BH, detalles, BT, FT, contadores y AMT del BT.
+
+    Devuelve (detalles, desbordados), con desbordados = [(nº registro, grupo,
+    cuenta, tipo, campo)]. Los LEDG-BAL desbordados no se suman al total.
+    """
     if len(regs) < 4:
         error("el archivo tiene menos de 4 registros")
     if regs[0][7:9] != "FH":
@@ -105,16 +109,46 @@ def validar_entrada(regs):
         error("BT declara %s detalles y hay %d" % (bt[25:32], len(detalles)))
     if int(ft[9:16]) != len(detalles):
         error("FT declara %s detalles y hay %d" % (ft[9:16], len(detalles)))
-    total = sum(decodificar_zoned(r[SALDO2]) for r in detalles)
     try:
-        total_bt = decodificar_zoned(bt[9:25])
-        if total_bt != total:
-            print("ADVERTENCIA: total BT de entrada (%d) != suma de saldos (%d)"
-                  % (total_bt, total), file=sys.stderr)
+        amt_bt = decodificar_zoned(bt[9:25])
     except ValueError:
-        print("ADVERTENCIA: total BT de entrada ilegible: %r" % bt[9:25],
-              file=sys.stderr)
-    return detalles
+        error("el AMT del BT de entrada es ilegible: %r" % bt[9:25])
+    suma_validos = 0      # suma de los LEDG-BAL con overpunch
+    suma_x = 0            # suma de X (12 dígitos) de los desbordados
+    desbordados = []
+    for i, r in enumerate(detalles, start=3):
+        campo = r[SALDO2]
+        if es_desbordado(campo):
+            suma_x += int(campo)
+            desbordados.append((i, r[GRUPO], r[CUENTA], r[33:36].strip(), campo))
+        else:
+            try:
+                suma_validos += decodificar_zoned(campo)
+            except ValueError:
+                error("registro %d: LEDG-BAL inválido %r" % (i, campo))
+    resto = amt_bt - suma_validos
+    if not desbordados:
+        if resto != 0:
+            error("AMT del BT (%d) != suma de los LEDG-BAL (%d)" % (amt_bt, suma_validos))
+    else:
+        # Cada importe real está entre X*10 y X*10+9
+        minimo = suma_x * 10
+        maximo = minimo + 9 * len(desbordados)
+        if not minimo <= resto <= maximo:
+            error("AMT del BT (%d) - suma de LEDG-BAL válidos (%d) = %d, fuera del rango "
+                  "[%d, %d] que explican los %d desbordados"
+                  % (amt_bt, suma_validos, resto, minimo, maximo, len(desbordados)))
+    return detalles, desbordados
+
+
+def es_desbordado(campo):
+    """LEDG-BAL desbordado: 12 dígitos sin carácter de overpunch.
+
+    El sistema de origen grababa los 12 primeros dígitos de un importe de 13 y
+    perdía el último carácter (el que llevaba el signo). El importe real queda
+    entre X*10 y X*10+9, siendo X el valor de los 12 dígitos.
+    """
+    return campo.isdigit()
 
 
 def armar_detalle(moneda, tipo, cuenta, fecha_detalle):
@@ -151,7 +185,7 @@ def main():
 
     # 1. Lectura y validación
     regs = leer_registros(args.archivo)
-    detalles = validar_entrada(regs)
+    detalles, desbordados = validar_entrada(regs)
     fh, bh = regs[0], regs[1]
 
     # 2. Cuenta inicial (ignorando cuentas sueltas fuera de serie)
@@ -203,7 +237,6 @@ def main():
 
     # 6. Renumerar secuencia: FH=1, BH=2, detalles desde 3
     pos_nuevas = {"00": [None, None], "02": [None, None]}   # [primer, ultimo] nº registro
-    total_saldos = 0
     out_det = []
     for i, r in enumerate(todos):
         nro = i + 3
@@ -212,7 +245,6 @@ def main():
             if rango[0] is None:
                 rango[0] = nro
             rango[1] = nro
-        total_saldos += decodificar_zoned(r[SALDO2])
         out_det.append(r[:4] + "%07d" % nro + r[11:])
 
     n_det = len(out_det)
@@ -222,13 +254,9 @@ def main():
     out_bh = "%07d" % 2 + bh[7:]
     bt = regs[-2]
     ft = regs[-1]
-    # El total del BT conserva el formato de la entrada: dígitos planos si el
-    # original los usaba (y el total no es negativo); si no, overpunch.
-    if bt[24].isdigit() and total_saldos >= 0:
-        total_txt = str(total_saldos).zfill(16)
-    else:
-        total_txt = codificar_zoned(total_saldos, 16)
-    out_bt = ("%07d" % (n_det + 3) + bt[7:9] + total_txt
+    # El AMT del BT NO se recalcula: las cuentas nuevas tienen saldo cero, así
+    # que se copia tal cual (mismo ancho) desde el BT de entrada.
+    out_bt = ("%07d" % (n_det + 3) + bt[7:9] + bt[9:25]
               + "%07d" % n_det + bt[32:])
     out_ft = "%07d" % (n_det + 4) + ft[7:9] + "%07d" % n_det + ft[16:]
     salida_regs = [out_fh, out_bh] + out_det + [out_bt, out_ft]
@@ -240,8 +268,7 @@ def main():
         if not a < b:
             error("claves fuera de orden o repetidas: %r >= %r" % (a, b))
     assert int(out_bt[25:32]) == n_det and int(out_ft[9:16]) == n_det
-    assert decodificar_zoned(out_bt[9:25]) == sum(
-        decodificar_zoned(r[SALDO2]) for r in out_det)
+    assert out_bt[9:25] == bt[9:25], "el AMT del BT de salida difiere del de entrada"
     # Originales intactos (ignorando secuencia): comparar como multiconjuntos
     orig = Counter(r[:4] + r[11:] for r in detalles)
     conservados = Counter(r[:4] + r[11:] for r in out_det
@@ -267,13 +294,18 @@ def main():
             print("    grupo %s cuenta %d" % (g, c))
     else:
         print("Cuentas fuera de serie ignoradas: ninguna")
+    if desbordados:
+        print("ADVERTENCIA - LEDG-BAL desbordados (12 dígitos sin overpunch), "
+              "no sumados y copiados sin cambios; conviene revisarlos con el sistema de origen:")
+        for nro, g, c, t, campo in desbordados:
+            print("    registro %d  cuenta %s %s  tipo %s  LEDG-BAL '%s'" % (nro, g, c, t, campo))
     print("Rango generado: %d a %d (%d cuentas por moneda, %d registros nuevos)"
           % (inicio, fin, args.cantidad, len(nuevos)))
     print("Pesos   nuevos: registros %d a %d" % tuple(pos_nuevas["00"]))
     print("Dólares nuevos: registros %d a %d" % tuple(pos_nuevas["02"]))
     print("Total de detalles: %d" % n_det)
-    print("BT: detalles=%s total saldos=%s (%d)"
-          % (out_bt[25:32], out_bt[9:25], total_saldos))
+    print("BT: detalles=%s AMT=%s (copiado sin cambios del BT de entrada)"
+          % (out_bt[25:32], out_bt[9:25]))
     print("FT: detalles=%s" % out_ft[9:16])
     print("Salida: %s (%d bytes)" % (salida, len(cuerpo)))
 
