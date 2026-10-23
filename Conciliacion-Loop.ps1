@@ -6,7 +6,9 @@
 .DESCRIPTION
     Compatible con Windows PowerShell 5.1 y PowerShell 7.
     Entradas: Loop (partidas), Débitos pendientes y Transferencias QNET (CSV).
-    Salidas: Conciliacion_Loop_<yyyyMMdd_HHmm>.xlsx y .html en -OutputDir.
+    Salidas: un Excel y un HTML por día en <OutputDir>\Diario (Conciliacion_Loop_<yyyyMMdd>.xlsx/.html)
+    y un dashboard general (Conciliacion_Loop_General.html) con filtro por fechas, que se arma
+    leyendo los datos embebidos en los HTML diarios de esa carpeta.
     Código de salida: 0 si no hubo excepciones de ejecución, 1 si las hubo.
     No se vuelcan nombres, CUIT ni CBU en las salidas.
 
@@ -14,6 +16,8 @@
 .PARAMETER PendientesPath      CSV de débitos pendientes (obligatorio).
 .PARAMETER TransferenciasPath  CSV de transferencias QNET (obligatorio).
 .PARAMETER LoopBasePath        CSV base de Loop para completar el período anterior (opcional).
+.PARAMETER IncluirPeriodo      Genera además el Excel y el HTML de todo el período.
+.PARAMETER SoloGeneral         Solo reconstruye el dashboard general desde los HTML diarios existentes.
 .PARAMETER OutputDir           Carpeta de salida (por defecto, la carpeta actual).
 
 .EXAMPLE
@@ -23,12 +27,14 @@
         -OutputDir .\salida
 #>
 #Requires -Version 5.1
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Conciliar')]
 param(
-    [Parameter(Mandatory = $true)][string]$LoopPath,
-    [Parameter(Mandatory = $true)][string]$PendientesPath,
-    [Parameter(Mandatory = $true)][string]$TransferenciasPath,
-    [string]$LoopBasePath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Conciliar')][string]$LoopPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Conciliar')][string]$PendientesPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Conciliar')][string]$TransferenciasPath,
+    [Parameter(ParameterSetName = 'Conciliar')][string]$LoopBasePath,
+    [Parameter(ParameterSetName = 'Conciliar')][switch]$IncluirPeriodo,
+    [Parameter(Mandatory = $true, ParameterSetName = 'General')][switch]$SoloGeneral,
     [string]$OutputDir = (Get-Location).Path
 )
 
@@ -68,6 +74,12 @@ function Write-Log {
 function Format-Num {
     param([decimal]$Valor)
     return $Valor.ToString('N2', $script:NfAR)
+}
+
+function Format-Periodo {
+    param($Desde, $Hasta)
+    if ($Desde -eq $Hasta) { return (Format-Fecha $Desde) }
+    return ('{0} al {1}' -f (Format-Fecha $Desde), (Format-Fecha $Hasta))
 }
 
 function Format-Importe {
@@ -525,6 +537,7 @@ function Get-Conciliacion {
     }
 
     # Cruce de transfers contra Loop
+    $det = New-Object 'System.Collections.Generic.List[object]'
     $enLoop = 0; $failSin = 0; $apSin = 0; $apPend = 0; $apFuera = 0; $cbuMal = 0
     foreach ($t in $Transfers.Rows) {
         if ($t.CbuOk -eq $false) {
@@ -532,13 +545,14 @@ function Get-Conciliacion {
             $esp = '02'; if ($t.Mon -eq 2) { $esp = '06' }
             $hall.Add((New-Hallazgo 'CBU origen no corresponde a la moneda' $t.Comnro $t.Cuenta $t.Mon $t.Fecha $t.Monto $t.Estado $null ("Dígitos 9 y 10 del CBU origen = '{0}', se esperaba '{1}'" -f $t.TipoCta, $esp)))
         }
-        if ($porComnro.ContainsKey($t.Comnro)) { $enLoop++; continue }
-        if ($t.Estado -eq 'FAILED') { $failSin++; continue }
-        if ($null -eq $t.Fecha) { $apSin++; $hall.Add((New-Hallazgo 'APPROVED sin registro' $t.Comnro $t.Cuenta $t.Mon $null $t.Monto 'APPROVED' $null 'APPROVED sin fecha y sin asiento en Loop')); continue }
-        if ($t.Fecha -ge $loopMax) { $apPend++ }
-        elseif ($t.Fecha -lt $loopMin) { $apFuera++ }
+        if ($porComnro.ContainsKey($t.Comnro)) { $enLoop++; $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'EnLoop' }); continue }
+        if ($t.Estado -eq 'FAILED') { $failSin++; $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'FailedSin' }); continue }
+        if ($null -eq $t.Fecha) { $apSin++; $det.Add([pscustomobject]@{ Fecha = $null; Clase = 'ApprovedSin' }); $hall.Add((New-Hallazgo 'APPROVED sin registro' $t.Comnro $t.Cuenta $t.Mon $null $t.Monto 'APPROVED' $null 'APPROVED sin fecha y sin asiento en Loop')); continue }
+        if ($t.Fecha -ge $loopMax) { $apPend++; $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'ApprovedPend' }) }
+        elseif ($t.Fecha -lt $loopMin) { $apFuera++; $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'ApprovedFuera' }) }
         else {
             $apSin++
+            $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'ApprovedSin' })
             $hall.Add((New-Hallazgo 'APPROVED sin registro' $t.Comnro $t.Cuenta $t.Mon $t.Fecha $t.Monto 'APPROVED' $null 'APPROVED dentro del período de Loop sin asiento'))
         }
     }
@@ -582,7 +596,7 @@ function Get-Conciliacion {
     $ordenados = @($comps | Sort-Object MonCod, Fecha, { $_.Comnro.PadLeft(20) })
     Write-Log "Conciliación: $($comps.Count) comprobantes de Loop, $($pDict.Count) pendientes, $($Transfers.Rows.Count) operaciones de transfers."
     return [pscustomobject]@{
-        Comprobantes = $ordenados; Hallazgos = $hall; Totales = $tot
+        Comprobantes = $ordenados; Hallazgos = $hall; Totales = $tot; TransfersDet = $det
         LoopMin = $loopMin; LoopMax = $loopMax; Corte = $corte
         Cruce = [pscustomobject]@{
             Total = $Transfers.Rows.Count; EnLoop = $enLoop; FailedSinRegistro = $failSin; ApprovedSinRegistro = $apSin
@@ -595,7 +609,7 @@ function Get-Conciliacion {
 
 function Get-Excepciones {
     # Une las marcas de cada comprobante con los hallazgos del cruce y ordena por tipo
-    param($Conc)
+    param($Conc, [switch]$Silencioso)
     $res = New-Object 'System.Collections.Generic.List[object]'
     $marcas = @('Más de 2 partidas', 'Una partida', 'Importes distintos', 'Pendiente con importe distinto', 'Débito pendiente')
     foreach ($c in $Conc.Comprobantes) {
@@ -608,7 +622,7 @@ function Get-Excepciones {
     $orden = $script:OrdenTipos
     $sorted = @($res | Sort-Object @{ Expression = { $i = [array]::IndexOf($orden, $_.Tipo); if ($i -lt 0) { 99 } else { $i } } }, @{ Expression = { $_.MonCod } }, @{ Expression = { if ($null -eq $_.Fecha) { [datetime]::MaxValue } else { $_.Fecha } } }, @{ Expression = { $_.Comprobante } })
     $n = @($sorted | Where-Object { $_.EsExcepcion }).Count
-    Write-Log "Excepciones detectadas: $n (más $(@($sorted).Count - $n) comprobantes con débito pendiente listados)."
+    if (-not $Silencioso) { Write-Log "Excepciones detectadas: $n (más $(@($sorted).Count - $n) comprobantes con débito pendiente listados)." }
     return , $sorted
 }
 
@@ -665,7 +679,7 @@ function Get-BloquesResumen {
                 @('Filas de la base ausentes en Loop', $Meta.Faltantes),
                 @('Débitos pendientes', $Meta.PendArchivo),
                 @('Transferencias', $Meta.TransArchivo),
-                @('Período de Loop', ('{0} al {1}' -f (Format-Fecha $Conc.LoopMin), (Format-Fecha $Conc.LoopMax))),
+                @('Período de Loop', (Format-Periodo $Conc.LoopMin $Conc.LoopMax)),
                 @('Corte de transfers', $(if ($Conc.Corte) { $Conc.Corte.ToString('dd/MM/yyyy HH:mm', $script:Inv) } else { '' }))
             )
     })
@@ -692,9 +706,13 @@ function Export-ExcelReport {
                 'Cuenta' = $_.Cuenta; 'Marca' = $_.Marca; 'Estado transfer' = $_.Estado
             } })
 
-    if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
-        Write-Log 'No está el módulo ImportExcel. Instalalo con: Install-Module ImportExcel -Scope CurrentUser' 'WARN'
-        Write-Log 'Como respaldo se exportan las hojas como CSV.' 'WARN'
+    if ($null -eq $script:TieneIE) { $script:TieneIE = [bool](Get-Module -ListAvailable -Name ImportExcel) }
+    if (-not $script:TieneIE) {
+        if (-not $script:AvisoIE) {
+            Write-Log 'No está el módulo ImportExcel. Instalalo con: Install-Module ImportExcel -Scope CurrentUser' 'WARN'
+            Write-Log 'Como respaldo se exportan las hojas como CSV.' 'WARN'
+            $script:AvisoIE = $true
+        }
         $resumen = foreach ($b in $bloques) {
             foreach ($f in $b.Filas) {
                 $o = [ordered]@{ 'Bloque' = $b.Titulo }
@@ -786,7 +804,7 @@ function Export-ExcelReport {
 
         # Resumen
         $ws = $pkg.Workbook.Worksheets.Add('Resumen')
-        $ws.Cells[1, 1].Value = 'Conciliación Loop - IBS - BankService'
+        $ws.Cells[1, 1].Value = 'Conciliación Loop - IBS - BankService' + $(if ($Meta.Dia) { ' - ' + (Format-Fecha $Meta.Dia) } else { '' })
         $ws.Cells[1, 1].Style.Font.Bold = $true; $ws.Cells[1, 1].Style.Font.Size = 14
         $ws.Cells[2, 1].Value = 'Generado: ' + (Get-Date).ToString('dd/MM/yyyy HH:mm', $script:Inv)
         $r = 4
@@ -826,6 +844,49 @@ function Export-ExcelReport {
 # ---------------------------------------------------------------------------
 # Dashboard HTML
 # ---------------------------------------------------------------------------
+function Get-CssBase {
+    return @'
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--fg:#1b2430;--muted:#5d6978;--line:#dde2e8;--alert:#c62828;--alertbg:#fdecea;
+--s0:#2a9d8f;--s1:#3d6fd1;--s2:#e08a1e;--s3:#c62828;--head:#eef1f5}
+@media (prefers-color-scheme:dark){:root{--bg:#12161c;--card:#1b222b;--fg:#e6ebf1;--muted:#97a3b2;--line:#2c3643;--alert:#ff8a80;--alertbg:#3a1f1f;
+--s0:#4fc3b4;--s1:#7ea4f2;--s2:#f0aa4d;--s3:#ff7b72;--head:#232c37}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+main{max-width:1200px;margin:0 auto;padding:20px 16px 48px}
+h1{margin:0 0 4px;font-size:22px}h2{margin:28px 0 10px;font-size:16px}
+.muted{color:var(--muted)}.meta{display:flex;flex-wrap:wrap;gap:6px 24px;color:var(--muted)}
+.resumen{margin:12px 0;padding:12px 14px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-weight:600}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.tile .lbl{color:var(--muted);font-size:12px}.tile .val{font-size:20px;font-weight:700;margin-top:2px;word-break:break-word}
+.tile .sub{color:var(--muted);font-size:12px}
+.tile.alert{border-color:var(--alert);background:var(--alertbg)}.tile.alert .val{color:var(--alert)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+td.n,th.n{text-align:right}td.det{white-space:normal;min-width:240px}
+thead th{background:var(--head);position:sticky;top:0}
+th.sort{cursor:pointer;user-select:none}th.sort:after{content:" \2195";color:var(--muted)}
+th.asc:after{content:" \25B2"}th.desc:after{content:" \25BC"}
+tfoot td{font-weight:700}
+.btns{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+button.f{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:16px;padding:4px 12px;cursor:pointer;font:inherit}
+button.f.on{background:var(--s1);border-color:var(--s1);color:#fff}
+input[type=search]{width:100%;max-width:360px;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);font:inherit;margin-bottom:10px}
+svg{width:100%;height:auto;display:block}svg .gl{stroke:var(--line);stroke-width:1}svg .ax{fill:var(--muted);font-size:11px}
+.s0{fill:var(--s0)}.s1{fill:var(--s1)}.s2{fill:var(--s2)}.s3{fill:var(--s3)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-bottom:6px}.sw{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+i.s0{background:var(--s0)}i.s1{background:var(--s1)}i.s2{background:var(--s2)}i.s3{background:var(--s3)}
+#tip{position:fixed;display:none;pointer-events:none;background:#111;color:#fff;padding:4px 8px;border-radius:4px;font-size:12px;z-index:9}
+@media (max-width:600px){h1{font-size:18px}.tile .val{font-size:17px}}
+label{display:block;font-size:12px;color:var(--muted)}input[type=date]{padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);font:inherit}
+.filtros{display:flex;flex-wrap:wrap;gap:10px;align-items:end}a{color:var(--s1)}caption{padding:8px;color:var(--muted);text-align:left}
+</style></head><body><main>
+'@
+}
+
 function New-SvgBarras {
     param($Conc)
     $dias = @{}
@@ -853,7 +914,7 @@ function New-SvgBarras {
     foreach ($frac in 0, 0.5, 1) {
         $y = $mt + $ph - ($frac * $ph)
         $val = [Math]::Round($frac * $max)
-        [void]$sb.Append("<line class=""grid"" x1=""$ml"" x2=""$($W - $mr)"" y1=""$(& $f $y)"" y2=""$(& $f $y)""/>")
+        [void]$sb.Append("<line class=""gl"" x1=""$ml"" x2=""$($W - $mr)"" y1=""$(& $f $y)"" y2=""$(& $f $y)""/>")
         [void]$sb.Append("<text class=""ax"" x=""$($ml - 6)"" y=""$(& $f ($y + 4))"" text-anchor=""end"">$val</text>")
     }
     $slot = $pw / $keys.Count
@@ -886,7 +947,7 @@ function New-SvgBarras {
 }
 
 function Export-HtmlDashboard {
-    param($Conc, $Excepciones, $PendDia, $Meta, [string]$Base)
+    param($Conc, $Excepciones, $PendDia, $Meta, [string]$Base, [switch]$EmbedirDatos)
     $ruta = $Base + '.html'
     $sb = New-Object System.Text.StringBuilder
     $ap = { param($t) [void]$sb.AppendLine($t) }
@@ -897,7 +958,7 @@ function Export-HtmlDashboard {
     $excs = @($Excepciones | Where-Object { $_.EsExcepcion })
     $tp = $Conc.Totales[0]; $tu = $Conc.Totales[2]
     $x = $Conc.Cruce
-    $periodo = '{0} al {1}' -f (Format-Fecha $Conc.LoopMin), (Format-Fecha $Conc.LoopMax)
+    $periodo = Format-Periodo $Conc.LoopMin $Conc.LoopMax
     $corteTxt = 'sin datos'; if ($Conc.Corte) { $corteTxt = $Conc.Corte.ToString('dd/MM/yyyy HH:mm', $script:Inv) }
     $frase = '{0} comprobantes con débito pendiente, {1} excepciones y {2} / {3} sin cubrir.' -f $nPend, $excs.Count, (Format-Importe $tp.SinCubrir 0), (Format-Importe $tu.SinCubrir 2)
 
@@ -914,45 +975,10 @@ function Export-HtmlDashboard {
     & $ap '<html lang="es"><head><meta charset="utf-8">'
     & $ap '<meta name="viewport" content="width=device-width, initial-scale=1">'
     & $ap '<title>Conciliación Loop</title>'
-    & $ap @'
-<style>
-:root{--bg:#f4f6f8;--card:#fff;--fg:#1b2430;--muted:#5d6978;--line:#dde2e8;--alert:#c62828;--alertbg:#fdecea;
---s0:#2a9d8f;--s1:#3d6fd1;--s2:#e08a1e;--s3:#c62828;--head:#eef1f5}
-@media (prefers-color-scheme:dark){:root{--bg:#12161c;--card:#1b222b;--fg:#e6ebf1;--muted:#97a3b2;--line:#2c3643;--alert:#ff8a80;--alertbg:#3a1f1f;
---s0:#4fc3b4;--s1:#7ea4f2;--s2:#f0aa4d;--s3:#ff7b72;--head:#232c37}}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif}
-main{max-width:1200px;margin:0 auto;padding:20px 16px 48px}
-h1{margin:0 0 4px;font-size:22px}h2{margin:28px 0 10px;font-size:16px}
-.muted{color:var(--muted)}.meta{display:flex;flex-wrap:wrap;gap:6px 24px;color:var(--muted)}
-.resumen{margin:12px 0;padding:12px 14px;background:var(--card);border:1px solid var(--line);border-radius:8px;font-weight:600}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
-.tile{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
-.tile .lbl{color:var(--muted);font-size:12px}.tile .val{font-size:20px;font-weight:700;margin-top:2px;word-break:break-word}
-.tile .sub{color:var(--muted);font-size:12px}
-.tile.alert{border-color:var(--alert);background:var(--alertbg)}.tile.alert .val{color:var(--alert)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px}
-.scroll{overflow-x:auto}
-table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
-th,td{padding:6px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
-td.n,th.n{text-align:right}td.det{white-space:normal;min-width:240px}
-thead th{background:var(--head);position:sticky;top:0}
-th.sort{cursor:pointer;user-select:none}th.sort:after{content:" \2195";color:var(--muted)}
-th.asc:after{content:" \25B2"}th.desc:after{content:" \25BC"}
-tfoot td{font-weight:700}
-.btns{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
-button.f{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:16px;padding:4px 12px;cursor:pointer;font:inherit}
-button.f.on{background:var(--s1);border-color:var(--s1);color:#fff}
-input[type=search]{width:100%;max-width:360px;padding:7px 10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);font:inherit;margin-bottom:10px}
-svg{width:100%;height:auto;display:block}svg .grid{stroke:var(--line);stroke-width:1}svg .ax{fill:var(--muted);font-size:11px}
-.s0{fill:var(--s0)}.s1{fill:var(--s1)}.s2{fill:var(--s2)}.s3{fill:var(--s3)}
-.legend{display:flex;flex-wrap:wrap;gap:6px 16px;margin-bottom:6px}.sw{display:inline-block;width:11px;height:11px;border-radius:2px;margin-right:5px;vertical-align:-1px}
-i.s0{background:var(--s0)}i.s1{background:var(--s1)}i.s2{background:var(--s2)}i.s3{background:var(--s3)}
-#tip{position:fixed;display:none;pointer-events:none;background:#111;color:#fff;padding:4px 8px;border-radius:4px;font-size:12px;z-index:9}
-@media (max-width:600px){h1{font-size:18px}.tile .val{font-size:17px}}
-</style></head><body><main>
-'@
-    & $ap '<h1>Conciliación Loop - IBS - BankService</h1>'
+    & $ap (Get-CssBase)
+    $tituloH1 = 'Conciliación Loop - IBS - BankService'
+    if ($Meta.Dia) { $tituloH1 += ' - ' + (Format-Fecha $Meta.Dia) }
+    & $ap ('<h1>{0}</h1>' -f (Get-Enc $tituloH1))
     & $ap ('<div class="meta"><span>Período de Loop: <b>{0}</b></span><span>Corte de transfers: <b>{1}</b></span><span>Generado: {2}</span></div>' -f (Get-Enc $periodo), (Get-Enc $corteTxt), (Get-Enc (Get-Date).ToString('dd/MM/yyyy HH:mm', $script:Inv)))
     & $ap ('<div class="resumen">{0}</div>' -f (Get-Enc $frase))
 
@@ -1022,6 +1048,7 @@ i.s0{background:var(--s0)}i.s1{background:var(--s1)}i.s2{background:var(--s2)}i.
     & $ap '</div>'
     & $ap ('<p class="muted">Archivos: {0}, {1}, {2}{3}. Los pendientes se informan por fecha del crédito en Loop.</p>' -f (Get-Enc $Meta.LoopArchivo), (Get-Enc $Meta.PendArchivo), (Get-Enc $Meta.TransArchivo), $(if ($Meta.BaseArchivo) { ', base ' + (Get-Enc $Meta.BaseArchivo) } else { '' }))
     & $ap '<div id="tip"></div>'
+    if ($EmbedirDatos) { & $ap ('<script type="application/json" id="datos-conciliacion">' + (Get-DatosDia $Conc $Excepciones $PendDia $Meta.Dia) + '</script>') }
     & $ap @'
 <script>
 (function(){
@@ -1061,10 +1088,234 @@ Array.prototype.forEach.call(tabla.tHead.rows[0].cells,function(th,i){
     return $ruta
 }
 
+function Get-DatosDia {
+    # Datos del día en JSON (sin importes sensibles) para que el dashboard general los pueda leer
+    param($Conc, $Excepciones, $PendDia, [datetime]$Dia)
+    $n = { param($m) @($Conc.Comprobantes | Where-Object { $_.Marca -eq $m }).Count }
+    $d2 = { param($v) ([decimal]$v).ToString('0.00', $script:Inv) }
+    $tp = $Conc.Totales[0]; $tu = $Conc.Totales[2]
+    $x = $Conc.Cruce
+    $pd = $null
+    if ($PendDia.Count -gt 0) { $pd = $PendDia[0] }
+    $cantP = 0; $cantU = 0; $sumP = [decimal]0; $sumU = [decimal]0
+    if ($null -ne $pd) { $cantP = $pd.CantPesos; $cantU = $pd.CantUsd; $sumP = $pd.Pesos; $sumU = $pd.Usd }
+    [object[]]$exc = @($Excepciones | Where-Object { $_.EsExcepcion } | ForEach-Object {
+            $imp = ''
+            if ($null -ne $_.Importe) { $imp = & $d2 $_.Importe }
+            @{ t = $_.Tipo; c = [string]$_.Comprobante; cta = [string]$_.Cuenta; m = [int]$_.MonCod; imp = $imp; est = [string]$_.Estado; det = [string]$_.Detalle }
+        })
+    $corte = ''
+    if ($Conc.Corte) { $corte = $Conc.Corte.ToString('dd/MM/yyyy HH:mm', $script:Inv) }
+    $o = [ordered]@{
+        fecha   = $Dia.ToString('yyyy-MM-dd', $script:Inv)
+        corte   = $corte
+        marcas  = @{ ok = (& $n 'OK'); pend = (& $n 'Débito pendiente'); pendDist = (& $n 'Pendiente con importe distinto'); una = (& $n 'Una partida'); dist = (& $n 'Importes distintos'); mas2 = (& $n 'Más de 2 partidas') }
+        dos     = @($Conc.Comprobantes | Where-Object { $_.Partidas -eq 2 }).Count
+        pesos   = @{ neto = (& $d2 $tp.Neto); pend = (& $d2 $tp.Pendientes) }
+        usd     = @{ neto = (& $d2 $tu.Neto); pend = (& $d2 $tu.Pendientes) }
+        cruce   = @{ total = $x.Total; enLoop = $x.EnLoop; failedSin = $x.FailedSinRegistro; approvedSin = $x.ApprovedSinRegistro; approvedPend = $x.ApprovedPendientes; approvedFuera = $x.ApprovedFuera }
+        pendDia = @{ cantP = $cantP; pesos = (& $d2 $sumP); cantU = $cantU; usd = (& $d2 $sumU) }
+        exc     = $exc
+    }
+    $json = $o | ConvertTo-Json -Depth 6 -Compress
+    return $json.Replace('<', '<')
+}
+
+function Get-ConciliacionDia {
+    # Recorta la conciliación a un solo día (misma forma que Get-Conciliacion)
+    param($Conc, [datetime]$Dia)
+    $comps = @($Conc.Comprobantes | Where-Object { $_.Fecha -eq $Dia })
+    $hall = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($h in $Conc.Hallazgos) {
+        if ($null -ne $h.Fecha -and ([datetime]$h.Fecha).Date -eq $Dia) { $hall.Add($h) }
+    }
+    $det = @($Conc.TransfersDet | Where-Object { $_.Fecha -eq $Dia })
+    $cuenta = { param($clase) @($det | Where-Object { $_.Clase -eq $clase }).Count }
+    $tot = @{}
+    foreach ($m in @(0, 2)) { $tot[$m] = [pscustomobject]@{ Neto = [decimal]0; Pendientes = [decimal]0; SinCubrir = [decimal]0 } }
+    foreach ($c in $comps) {
+        if (-not $tot.ContainsKey($c.MonCod)) { $tot[$c.MonCod] = [pscustomobject]@{ Neto = [decimal]0; Pendientes = [decimal]0; SinCubrir = [decimal]0 } }
+        $tot[$c.MonCod].Neto += $c.Neto
+        if ($c.Marca -eq 'Débito pendiente') { $tot[$c.MonCod].Pendientes += $c.PendImporte }
+    }
+    foreach ($m in @($tot.Keys)) { $tot[$m].SinCubrir = $tot[$m].Neto - $tot[$m].Pendientes }
+    return [pscustomobject]@{
+        Comprobantes = $comps; Hallazgos = $hall; Totales = $tot; LoopMin = $Dia; LoopMax = $Dia; Corte = $Conc.Corte
+        Cruce = [pscustomobject]@{
+            Total = $det.Count; EnLoop = (& $cuenta 'EnLoop'); FailedSinRegistro = (& $cuenta 'FailedSin'); ApprovedSinRegistro = (& $cuenta 'ApprovedSin')
+            ApprovedPendientes = (& $cuenta 'ApprovedPend'); ApprovedFuera = (& $cuenta 'ApprovedFuera')
+            CbuMoneda = @($hall | Where-Object { $_.Tipo -eq 'CBU origen no corresponde a la moneda' }).Count
+        }
+        PendientesPosteriores = 0; PendientesTotal = @($comps | Where-Object { $null -ne $_.PendImporte }).Count
+    }
+}
+
+function Export-DashboardGeneral {
+    # Dashboard general con filtro por fechas: lee los datos embebidos en los HTML diarios de <OutputDir>\Diario
+    param([string]$OutputDir)
+    $dirDia = Join-Path $OutputDir 'Diario'
+    if (-not (Test-Path -LiteralPath $dirDia -PathType Container)) { throw "No existe la carpeta de reportes diarios: $dirDia" }
+    $archivos = @(Get-ChildItem -LiteralPath $dirDia -Filter 'Conciliacion_Loop_*.html' | Where-Object { $_.Name -match '^Conciliacion_Loop_\d{8}\.html$' } | Sort-Object Name)
+    if ($archivos.Count -eq 0) { throw "No hay HTML diarios (Conciliacion_Loop_yyyyMMdd.html) en $dirDia" }
+    $items = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($a in $archivos) {
+        try {
+            $html = Get-Content -LiteralPath $a.FullName -Raw -Encoding UTF8
+            $m = [regex]::Match($html, '<script type="application/json" id="datos-conciliacion">(.*?)</script>', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+            if (-not $m.Success) { throw 'no tiene el bloque de datos' }
+            $json = $m.Groups[1].Value
+            $null = $json | ConvertFrom-Json
+            $xl = (Test-Path -LiteralPath ([System.IO.Path]::ChangeExtension($a.FullName, '.xlsx'))).ToString().ToLower()
+            $items.Add('{"archivo":"Diario/' + $a.Name + '","xlsx":' + $xl + ',"datos":' + $json + '}')
+        }
+        catch { Write-Log ('No se pudo leer {0}: {1}' -f $a.Name, $_.Exception.Message) 'WARN' }
+    }
+    if ($items.Count -eq 0) { throw 'Ningún HTML diario tiene datos válidos.' }
+    $ruta = Join-Path $OutputDir 'Conciliacion_Loop_General.html'
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<!DOCTYPE html>')
+    [void]$sb.AppendLine('<html lang="es"><head><meta charset="utf-8">')
+    [void]$sb.AppendLine('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    [void]$sb.AppendLine('<title>Conciliación Loop - General</title>')
+    [void]$sb.AppendLine((Get-CssBase))
+    [void]$sb.AppendLine('<h1>Conciliación Loop - IBS - BankService (general)</h1>')
+    [void]$sb.AppendLine(('<div class="meta"><span>Días cargados: <b>{0}</b></span><span>Generado: {1}</span></div>' -f $items.Count, (Get-Enc (Get-Date).ToString('dd/MM/yyyy HH:mm', $script:Inv))))
+    [void]$sb.AppendLine(@'
+<div class="card filtros" style="margin-top:12px">
+<div><label for="desde">Desde</label><input type="date" id="desde"></div>
+<div><label for="hasta">Hasta</label><input type="date" id="hasta"></div>
+<button class="f" id="bTodo">Todo</button><button class="f" id="bUlt">Último día</button><button class="f" id="b7">Últimos 7 días</button>
+</div>
+<div class="resumen" id="frase"></div>
+<h2>Transferencias Loop IBS</h2><div class="grid" id="t1"></div>
+<h2>Desbalance por moneda</h2><div class="grid" id="t2"></div>
+<h2>Transferencias Loop BankService</h2><div class="grid" id="t3"></div>
+<h2>Transferencias Loop por fecha</h2><div class="card" id="chart"></div>
+<h2>Saldo de débitos pendientes por día</h2><div class="card scroll"><table id="saldo"></table></div>
+<h2>Detalle por día</h2><div class="card scroll"><table id="dias"></table></div>
+<h2>Excepciones a revisar</h2><div class="card">
+<div class="btns" id="filtros"></div>
+<input type="search" id="q" placeholder="Buscar por comprobante, cuenta o fecha">
+<div class="scroll"><table id="exc"></table></div></div>
+<div id="tip"></div>
+'@)
+    [void]$sb.AppendLine('<script type="application/json" id="datos">[' + ($items -join ',') + ']</script>')
+    [void]$sb.AppendLine(@'
+<script>
+(function(){
+var D=JSON.parse(document.getElementById('datos').textContent).filter(function(x){return x&&x.datos&&/^\d{4}-\d{2}-\d{2}$/.test(x.datos.fecha);});
+D.sort(function(a,b){return a.datos.fecha<b.datos.fecha?-1:(a.datos.fecha>b.datos.fecha?1:0);});
+var el=function(id){return document.getElementById(id);};
+var num=function(s){var n=parseFloat(s);return isNaN(n)?0:n;};
+function fmt(n){var neg=n<0;n=Math.abs(n);var p=(Math.round(n*100)/100).toFixed(2).split('.');p[0]=p[0].replace(/\B(?=(\d{3})+(?!\d))/g,'.');return (neg&&(p[0]!=='0'||p[1]!=='00')?'-':'')+p[0]+','+p[1];}
+function money(n,usd){return (usd?'US$ ':'$ ')+fmt(n);}
+function fdate(i){var p=i.split('-');return p[2]+'/'+p[1]+'/'+p[0];}
+function mk(tag,txt,cls){var e=document.createElement(tag);if(txt!==undefined&&txt!==null)e.textContent=txt;if(cls)e.className=cls;return e;}
+var sel=[],tipo='',q='',sortCol=-1,sortAsc=true;
+function tiles(id,arr){var c=el(id);c.innerHTML='';arr.forEach(function(t){var d=mk('div',null,'tile'+(t[2]?' alert':''));d.appendChild(mk('div',t[0],'lbl'));d.appendChild(mk('div',String(t[1]),'val'));if(t[3])d.appendChild(mk('div',t[3],'sub'));c.appendChild(d);});}
+function bindTips(){var tip=el('tip');document.querySelectorAll('[data-tip]').forEach(function(e){
+  function show(ev){tip.textContent=e.getAttribute('data-tip');tip.style.display='block';tip.style.left=Math.min(ev.clientX+12,window.innerWidth-200)+'px';tip.style.top=(ev.clientY+14)+'px';}
+  e.addEventListener('mousemove',show);e.addEventListener('click',show);e.addEventListener('mouseleave',function(){tip.style.display='none';});});}
+function chart(){
+  var box=el('chart');
+  if(!sel.length){box.textContent='Sin datos en el rango elegido.';return;}
+  var names=['Correctos','Débito pendiente','Una partida','Importes distintos'];
+  var W=900,H=320,ml=46,mr=10,mt=14,mb=44,pw=W-ml-mr,ph=H-mt-mb,max=1;
+  var vals=sel.map(function(x){var m=x.datos.marcas;return [m.ok||0,(m.pend||0)+(m.pendDist||0),m.una||0,m.dist||0];});
+  vals.forEach(function(v){var t=v[0]+v[1]+v[2]+v[3];if(t>max)max=t;});
+  var slot=pw/sel.length,bw=Math.min(40,slot*0.7),paso=Math.ceil(sel.length/18),h='';
+  [0,0.5,1].forEach(function(fr){var y=mt+ph-fr*ph;h+='<line class="gl" x1="'+ml+'" x2="'+(W-mr)+'" y1="'+y+'" y2="'+y+'"/><text class="ax" x="'+(ml-6)+'" y="'+(y+4)+'" text-anchor="end">'+Math.round(fr*max)+'</text>';});
+  sel.forEach(function(x,i){var xx=ml+slot*i+(slot-bw)/2,base=mt+ph,v=vals[i],f=fdate(x.datos.fecha);
+    for(var k=0;k<4;k++){if(v[k]<=0)continue;var hh=v[k]/max*ph;base-=hh;h+='<rect class="s'+k+'" x="'+xx+'" y="'+base+'" width="'+bw+'" height="'+hh+'" data-tip="'+f+' - '+names[k]+': '+v[k]+'"/>';}
+    if(i%paso===0)h+='<text class="ax" x="'+(xx+bw/2)+'" y="'+(H-24)+'" text-anchor="middle">'+f.slice(0,5)+'</text>';});
+  var leg='<div class="legend">';for(var k=0;k<4;k++)leg+='<span><i class="sw s'+k+'"></i>'+names[k]+'</span>';
+  box.innerHTML=leg+'</div><svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Transferencias Loop por fecha y estado">'+h+'</svg>';
+  bindTips();
+}
+function tabla(t,heads,rows,foot){
+  t.innerHTML='';var th=mk('thead'),tr=mk('tr');
+  heads.forEach(function(h){tr.appendChild(mk('th',h[0],h[1]||''));});th.appendChild(tr);t.appendChild(th);
+  var tb=mk('tbody');rows.forEach(function(r){var row=mk('tr');r.forEach(function(c,i){
+    var td;if(c&&c.href){td=mk('td');var a=mk('a',c.t);a.href=c.href;td.appendChild(a);}else td=mk('td',c,(heads[i][1]||'').indexOf('n')>=0?'n':'');row.appendChild(td);});tb.appendChild(row);});t.appendChild(tb);
+  if(foot){var tf=mk('tfoot'),fr=mk('tr');foot.forEach(function(c,i){fr.appendChild(mk('td',c,(heads[i][1]||'').indexOf('n')>=0?'n':''));});tf.appendChild(fr);t.appendChild(tf);}
+}
+function excepciones(){
+  var rows=[];sel.forEach(function(x){(x.datos.exc||[]).forEach(function(e){rows.push({f:x.datos.fecha,t:e.t,c:e.c,cta:e.cta,m:e.m,imp:num(e.imp),est:e.est,det:e.det});});});
+  var tipos={};rows.forEach(function(r){tipos[r.t]=(tipos[r.t]||0)+1;});
+  if(tipo&&!tipos[tipo])tipo='';
+  var fb=el('filtros');fb.innerHTML='';
+  function boton(txt,val){var b=mk('button',txt,'f'+(tipo===val?' on':''));b.addEventListener('click',function(){tipo=val;excepciones();});fb.appendChild(b);}
+  boton('Todos ('+rows.length+')','');Object.keys(tipos).forEach(function(k){boton(k+' ('+tipos[k]+')',k);});
+  var vis=rows.filter(function(r){
+    if(tipo&&r.t!==tipo)return false;
+    if(q){var s=(r.c+' '+r.cta+' '+fdate(r.f)+' '+r.f).toLowerCase();if(s.indexOf(q)<0)return false;}return true;});
+  var keys=['f','t','c','cta','m','imp','est'];
+  var ord=sortCol>=0?keys[sortCol]:'f';
+  vis.sort(function(a,b){var x=a[ord],y=b[ord],r;
+    if(typeof x==='number'&&typeof y==='number')r=x-y;else r=String(x).localeCompare(String(y),'es');
+    if(r===0)r=String(a.c).localeCompare(String(b.c),'es');return sortAsc?r:-r;});
+  var heads=[['Día','sort'],['Tipo','sort'],['Comprobante','sort'],['Cuenta','sort'],['Moneda','sort'],['Importe','sort n'],['Estado transfer','sort'],['Detalle','']];
+  var data=vis.map(function(r){return [fdate(r.f),r.t,r.c,r.cta,r.m===2?'USD':(r.m===0?'Pesos':'Moneda '+r.m),money(r.imp,r.m===2),r.est,r.det];});
+  var t=el('exc');
+  if(!data.length){t.innerHTML='';t.appendChild(mk('caption','Sin excepciones en el rango elegido.'));return;}
+  tabla(t,heads,data);
+  Array.prototype.forEach.call(t.tHead.rows[0].cells,function(c,i){
+    if(!c.classList.contains('sort'))return;
+    c.classList.add(sortCol===i?(sortAsc?'asc':'desc'):'x');
+    c.addEventListener('click',function(){if(sortCol===i)sortAsc=!sortAsc;else{sortCol=i;sortAsc=true;}excepciones();});});
+}
+function render(){
+  var d=el('desde').value,h=el('hasta').value;
+  sel=D.filter(function(x){var f=x.datos.fecha;return (!d||f>=d)&&(!h||f<=h);});
+  var s={ok:0,pend:0,pendDist:0,una:0,dist:0,mas2:0,dos:0,nExc:0,pNeto:0,pPend:0,uNeto:0,uPend:0,total:0,enLoop:0,failedSin:0,approvedSin:0,approvedPend:0,approvedFuera:0};
+  sel.forEach(function(x){var o=x.datos,m=o.marcas,c=o.cruce;
+    s.ok+=m.ok||0;s.pend+=m.pend||0;s.pendDist+=m.pendDist||0;s.una+=m.una||0;s.dist+=m.dist||0;s.mas2+=m.mas2||0;s.dos+=o.dos||0;s.nExc+=(o.exc||[]).length;
+    s.pNeto+=num(o.pesos.neto);s.pPend+=num(o.pesos.pend);s.uNeto+=num(o.usd.neto);s.uPend+=num(o.usd.pend);
+    s.total+=c.total||0;s.enLoop+=c.enLoop||0;s.failedSin+=c.failedSin||0;s.approvedSin+=c.approvedSin||0;s.approvedPend+=c.approvedPend||0;s.approvedFuera+=c.approvedFuera||0;});
+  var sinP=s.pNeto-s.pPend,sinU=s.uNeto-s.uPend;
+  var rango=sel.length?(sel.length===1?fdate(sel[0].datos.fecha):fdate(sel[0].datos.fecha)+' al '+fdate(sel[sel.length-1].datos.fecha)):'sin días';
+  el('frase').textContent=sel.length+' día(s) ('+rango+'): '+s.pend+' comprobantes con débito pendiente, '+s.nExc+' excepciones y '+money(sinP)+' / '+money(sinU,true)+' sin cubrir.';
+  tiles('t1',[['Con 2 partidas',s.dos,false,'Correctos: '+s.ok],['Con débito pendiente',s.pend,false],['Con una partida',s.una,s.una>0],['Con importes distintos',s.dist,s.dist>0],['Excepciones',s.nExc,s.nExc>0]]);
+  tiles('t2',[['Neto en Loop - Pesos',money(s.pNeto),false],['Pendientes - Pesos',money(s.pPend),false],['Sin cubrir - Pesos',money(sinP),Math.abs(sinP)>0.005],
+    ['Neto en Loop - USD',money(s.uNeto,true),false],['Pendientes - USD',money(s.uPend,true),false],['Sin cubrir - USD',money(sinU,true),Math.abs(sinU)>0.005]]);
+  tiles('t3',[['Operaciones',s.total,false],['Encontradas en Loop',s.enLoop,false],['FAILED sin registro',s.failedSin,false],['APPROVED sin registro',s.approvedSin,s.approvedSin>0],
+    ['APPROVED pendientes de contabilizar',s.approvedPend,false,'No son excepción'],['APPROVED fuera del período',s.approvedFuera,false]]);
+  chart();
+  var aP=0,aU=0,cP=0,cU=0,tP=0,tU=0;
+  var filas=sel.map(function(x){var p=x.datos.pendDia;aP+=num(p.pesos);aU+=num(p.usd);cP+=p.cantP||0;cU+=p.cantU||0;
+    return [fdate(x.datos.fecha),p.cantP||0,p.cantP?money(num(p.pesos)):'',money(aP),p.cantU||0,p.cantU?money(num(p.usd),true):'',money(aU,true)];});
+  tabla(el('saldo'),[['Fecha del crédito'],['Comprobantes $','n'],['Pesos','n'],['Acumulado $','n'],['Comprobantes US$','n'],['USD','n'],['Acumulado US$','n']],filas,
+    ['Total',cP,money(aP),'',cU,money(aU,true),'']);
+  tabla(el('dias'),[['Día'],['Correctos','n'],['Débito pendiente','n'],['Una partida','n'],['Importes distintos','n'],['Excepciones','n'],['Sin cubrir $','n'],['Sin cubrir US$','n'],['HTML'],['Excel']],
+    sel.map(function(x){var o=x.datos,m=o.marcas;return [fdate(o.fecha),m.ok||0,(m.pend||0)+(m.pendDist||0),m.una||0,m.dist||0,(o.exc||[]).length,money(num(o.pesos.neto)-num(o.pesos.pend)),money(num(o.usd.neto)-num(o.usd.pend),true),
+      {t:'Abrir',href:x.archivo},x.xlsx?{t:'Abrir',href:x.archivo.replace(/\.html$/,'.xlsx')}:'-'];}));
+  excepciones();
+}
+function fijar(d,h){el('desde').value=d;el('hasta').value=h;render();}
+el('desde').min=el('hasta').min=D[0].datos.fecha;el('desde').max=el('hasta').max=D[D.length-1].datos.fecha;
+el('desde').addEventListener('change',render);el('hasta').addEventListener('change',render);
+el('bTodo').addEventListener('click',function(){fijar('','');});
+el('bUlt').addEventListener('click',function(){var f=D[D.length-1].datos.fecha;fijar(f,f);});
+el('b7').addEventListener('click',function(){fijar(D[Math.max(0,D.length-7)].datos.fecha,D[D.length-1].datos.fecha);});
+el('q').addEventListener('input',function(e){q=e.target.value.trim().toLowerCase();excepciones();});
+render();
+})();
+</script></main></body></html>
+'@)
+    [System.IO.File]::WriteAllText($ruta, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+    Write-Log ('Dashboard general generado: {0} ({1} días)' -f $ruta, $items.Count) 'OK'
+    return $ruta
+}
+
 # ---------------------------------------------------------------------------
 # Programa principal
 # ---------------------------------------------------------------------------
 try {
+    if ($SoloGeneral) {
+        Write-Log 'Modo SoloGeneral: se reconstruye el dashboard general desde los HTML diarios.'
+        $null = Export-DashboardGeneral -OutputDir (Resolve-Path -LiteralPath $OutputDir).Path
+        exit 0
+    }
     Write-Log 'Inicio de la conciliación.'
     $loop = Read-Loop -Path $LoopPath
     $base = $null
@@ -1088,14 +1339,43 @@ try {
     Write-Log ("Transfers: {0} operaciones, {1} en Loop, {2} FAILED sin registro, {3} APPROVED sin registro, {4} APPROVED pendientes de contabilizar, {5} fuera del período." -f $x.Total, $x.EnLoop, $x.FailedSinRegistro, $x.ApprovedSinRegistro, $x.ApprovedPendientes, $x.ApprovedFuera)
 
     if (-not (Test-Path -LiteralPath $OutputDir)) { $null = New-Item -ItemType Directory -Path $OutputDir -Force }
-    $stamp = (Get-Date).ToString('yyyyMMdd_HHmm', $script:Inv)
-    $baseOut = Join-Path (Resolve-Path -LiteralPath $OutputDir).Path "Conciliacion_Loop_$stamp"
+    $outDir = (Resolve-Path -LiteralPath $OutputDir).Path
+    $dirDia = Join-Path $outDir 'Diario'
+    if (-not (Test-Path -LiteralPath $dirDia)) { $null = New-Item -ItemType Directory -Path $dirDia -Force }
     $meta = [pscustomobject]@{
         LoopArchivo = $loop.Archivo; BaseArchivo = $(if ($base) { $base.Archivo } else { '' }); Faltantes = $loopFinal.Faltantes
-        PendArchivo = $pend.Archivo; TransArchivo = $trans.Archivo
+        PendArchivo = $pend.Archivo; TransArchivo = $trans.Archivo; Dia = $null
     }
-    $null = Export-ExcelReport -Conc $conc -Excepciones $exc -PendDia $ppd -Meta $meta -Base $baseOut
-    $null = Export-HtmlDashboard -Conc $conc -Excepciones $exc -PendDia $ppd -Meta $meta -Base $baseOut
+
+    # Un Excel y un HTML por día
+    $fechas = @()
+    $fechas += @($conc.Comprobantes | ForEach-Object { $_.Fecha })
+    $fechas += @($conc.Hallazgos | Where-Object { $null -ne $_.Fecha } | ForEach-Object { ([datetime]$_.Fecha).Date })
+    $dias = @($fechas | Sort-Object -Unique)
+    Write-Log "Se generan $($dias.Count) reportes diarios en $dirDia"
+    foreach ($dia in $dias) {
+        $sd = Get-ConciliacionDia -Conc $conc -Dia $dia
+        $ed = Get-Excepciones -Conc $sd -Silencioso
+        $pd = Get-PendientesPorDia -Conc $sd
+        $metaDia = [pscustomobject]@{
+            LoopArchivo = $meta.LoopArchivo; BaseArchivo = $meta.BaseArchivo; Faltantes = $meta.Faltantes
+            PendArchivo = $meta.PendArchivo; TransArchivo = $meta.TransArchivo; Dia = $dia
+        }
+        $baseDia = Join-Path $dirDia ('Conciliacion_Loop_' + $dia.ToString('yyyyMMdd', $script:Inv))
+        $nExc = @($ed | Where-Object { $_.EsExcepcion }).Count
+        Write-Log ('{0}: {1} comprobantes, {2} excepciones.' -f (Format-Fecha $dia), @($sd.Comprobantes).Count, $nExc)
+        $null = Export-ExcelReport -Conc $sd -Excepciones $ed -PendDia $pd -Meta $metaDia -Base $baseDia
+        $null = Export-HtmlDashboard -Conc $sd -Excepciones $ed -PendDia $pd -Meta $metaDia -Base $baseDia -EmbedirDatos
+    }
+
+    if ($IncluirPeriodo) {
+        $baseOut = Join-Path $outDir ('Conciliacion_Loop_Periodo_' + (Get-Date).ToString('yyyyMMdd_HHmm', $script:Inv))
+        $null = Export-ExcelReport -Conc $conc -Excepciones $exc -PendDia $ppd -Meta $meta -Base $baseOut
+        $null = Export-HtmlDashboard -Conc $conc -Excepciones $exc -PendDia $ppd -Meta $meta -Base $baseOut
+    }
+
+    # Dashboard general: se alimenta de los HTML diarios (incluidos los de corridas anteriores)
+    $null = Export-DashboardGeneral -OutputDir $outDir
     Write-Log 'Conciliación finalizada.' 'OK'
     exit 0
 }
