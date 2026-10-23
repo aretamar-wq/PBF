@@ -709,7 +709,7 @@ function Export-ExcelReport {
             'Pendientes por dia' = @($PendDia | ForEach-Object {
                     [pscustomobject][ordered]@{ 'Fecha del crédito' = (& $fmtFecha $_.Fecha); 'Comprobantes en pesos' = $_.CantPesos; 'Pesos' = $_.Pesos; 'Acumulado en pesos' = $_.AcumPesos
                         'Comprobantes en USD' = $_.CantUsd; 'USD' = $_.Usd; 'Acumulado en USD' = $_.AcumUsd } })
-            'Comprobantes'      = @($filasComp | ForEach-Object { $_.'Fecha débito' = (& $fmtFecha $_.'Fecha débito'); $_.'Fecha crédito' = (& $fmtFecha $_.'Fecha crédito'); $_ })
+            'Transferencias_Loop_IBS'     = @($filasComp | ForEach-Object { $_.'Fecha débito' = (& $fmtFecha $_.'Fecha débito'); $_.'Fecha crédito' = (& $fmtFecha $_.'Fecha crédito'); $_ })
         }
         $out = @()
         foreach ($nombre in $csvs.Keys) {
@@ -773,8 +773,8 @@ function Export-ExcelReport {
 
         # Comprobantes
         if ($filasComp.Count -gt 0) {
-            $null = Export-Excel -ExcelPackage $pkg -WorksheetName 'Comprobantes' -InputObject $filasComp -AutoFilter -FreezeTopRow -BoldTopRow -PassThru
-            $wc = $pkg.Workbook.Worksheets['Comprobantes']
+            $null = Export-Excel -ExcelPackage $pkg -WorksheetName 'Transferencias Loop IBS' -InputObject $filasComp -AutoFilter -FreezeTopRow -BoldTopRow -PassThru
+            $wc = $pkg.Workbook.Worksheets['Transferencias Loop IBS']
             $uc = $filasComp.Count + 1
             $wc.Cells[2, 5, $uc, 7].Style.Numberformat.Format = '#,##0.00'
             $wc.Cells[2, 8, $uc, 9].Style.Numberformat.Format = 'dd/mm/yyyy'
@@ -782,7 +782,7 @@ function Export-ExcelReport {
             $wc.Cells[2, 10, $uc, 10].Style.Numberformat.Format = '0'
             try { $wc.Cells[$wc.Dimension.Address].AutoFitColumns() } catch { }
         }
-        else { $null = $pkg.Workbook.Worksheets.Add('Comprobantes') }
+        else { $null = $pkg.Workbook.Worksheets.Add('Transferencias Loop IBS') }
 
         # Resumen
         $ws = $pkg.Workbook.Worksheets.Add('Resumen')
@@ -956,7 +956,7 @@ i.s0{background:var(--s0)}i.s1{background:var(--s1)}i.s2{background:var(--s2)}i.
     & $ap ('<div class="meta"><span>Período de Loop: <b>{0}</b></span><span>Corte de transfers: <b>{1}</b></span><span>Generado: {2}</span></div>' -f (Get-Enc $periodo), (Get-Enc $corteTxt), (Get-Enc (Get-Date).ToString('dd/MM/yyyy HH:mm', $script:Inv)))
     & $ap ('<div class="resumen">{0}</div>' -f (Get-Enc $frase))
 
-    & $ap '<h2>Comprobantes</h2><div class="grid">'
+    & $ap '<h2>Transferencias Loop IBS</h2><div class="grid">'
     & $ap (& $tile 'Con 2 partidas' $nDos $false ('Correctos: {0}' -f $nOk))
     & $ap (& $tile 'Con débito pendiente' $nPend $false '')
     & $ap (& $tile 'Con una partida' $nUna ($nUna -gt 0) '')
