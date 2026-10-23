@@ -786,7 +786,7 @@ function Export-ExcelReport {
 
         # Resumen
         $ws = $pkg.Workbook.Worksheets.Add('Resumen')
-        $ws.Cells[1, 1].Value = 'Conciliación Loop - Transferencias QNET'
+        $ws.Cells[1, 1].Value = 'Conciliación Loop - IBS - BankService'
         $ws.Cells[1, 1].Style.Font.Bold = $true; $ws.Cells[1, 1].Style.Font.Size = 14
         $ws.Cells[2, 1].Value = 'Generado: ' + (Get-Date).ToString('dd/MM/yyyy HH:mm', $script:Inv)
         $r = 4
@@ -952,7 +952,7 @@ i.s0{background:var(--s0)}i.s1{background:var(--s1)}i.s2{background:var(--s2)}i.
 @media (max-width:600px){h1{font-size:18px}.tile .val{font-size:17px}}
 </style></head><body><main>
 '@
-    & $ap '<h1>Conciliación Loop - Transferencias QNET</h1>'
+    & $ap '<h1>Conciliación Loop - IBS - BankService</h1>'
     & $ap ('<div class="meta"><span>Período de Loop: <b>{0}</b></span><span>Corte de transfers: <b>{1}</b></span><span>Generado: {2}</span></div>' -f (Get-Enc $periodo), (Get-Enc $corteTxt), (Get-Enc (Get-Date).ToString('dd/MM/yyyy HH:mm', $script:Inv)))
     & $ap ('<div class="resumen">{0}</div>' -f (Get-Enc $frase))
 
