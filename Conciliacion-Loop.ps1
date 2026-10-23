@@ -642,7 +642,7 @@ function Get-BloquesResumen {
     $filas += , @('Total de comprobantes', $Conc.Comprobantes.Count)
     $bloques.Add(@{ Titulo = 'Comprobantes por marca'; Cols = @('Marca', 'Cantidad'); Filas = $filas; Formula = $false })
     $x = $Conc.Cruce
-    $bloques.Add(@{ Titulo = 'Cruce con transfers'; Cols = @('Concepto', 'Cantidad'); Formula = $false; Filas = @(
+    $bloques.Add(@{ Titulo = 'Transferencias Loop BankService'; Cols = @('Concepto', 'Cantidad'); Formula = $false; Filas = @(
                 @('Total de operaciones', $x.Total),
                 @('Encontradas en Loop', $x.EnLoop),
                 @('FAILED sin registro', $x.FailedSinRegistro),
@@ -973,7 +973,7 @@ i.s0{background:var(--s0)}i.s1{background:var(--s1)}i.s2{background:var(--s2)}i.
     & $ap (& $tile 'Sin cubrir - USD' (Format-Importe $tu.SinCubrir 2) (& $dinero $tu.SinCubrir) '')
     & $ap '</div>'
 
-    & $ap '<h2>Cruce con transfers</h2><div class="grid">'
+    & $ap '<h2>Transferencias Loop BankService</h2><div class="grid">'
     & $ap (& $tile 'Operaciones' $x.Total $false '')
     & $ap (& $tile 'Encontradas en Loop' $x.EnLoop $false '')
     & $ap (& $tile 'FAILED sin registro' $x.FailedSinRegistro $false '')
