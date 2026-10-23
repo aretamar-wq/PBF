@@ -982,7 +982,7 @@ i.s0{background:var(--s0)}i.s1{background:var(--s1)}i.s2{background:var(--s2)}i.
     & $ap (& $tile 'APPROVED fuera del período' $x.ApprovedFuera $false '')
     & $ap '</div>'
 
-    & $ap '<h2>Comprobantes por fecha</h2><div class="card">'
+    & $ap '<h2>Transferencias Loop por fecha</h2><div class="card">'
     & $ap (New-SvgBarras $Conc)
     & $ap '</div>'
 
