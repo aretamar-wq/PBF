@@ -1,0 +1,151 @@
+﻿<#
+.SYNOPSIS
+    Ejecuta la consulta de débitos pendientes en SAP Sybase (ASE) y guarda el resultado en un CSV.
+
+.DESCRIPTION
+    Compatible con Windows PowerShell 5.1 y PowerShell 7. Usa ODBC (System.Data.Odbc), por lo que
+    necesita el driver ODBC de Sybase/SAP ASE instalado con la misma arquitectura (32 o 64 bits)
+    que el PowerShell que se usa. Trae los débitos pendientes del día anterior (por fecorigen),
+    o del día indicado en -Fecha. El CSV queda listo para usar como -PendientesPath en
+    Conciliacion-Loop.ps1 (fechas d/M/yyyy HH:mm:ss.fff, decimales con punto, UTF-8).
+
+.PARAMETER Dsn               Nombre del DSN ODBC ya configurado (opción más simple).
+.PARAMETER ConnectionString  Cadena de conexión ODBC completa (alternativa a -Dsn / -Server).
+.PARAMETER Server            Servidor ASE (si no se usa -Dsn ni -ConnectionString).
+.PARAMETER Port              Puerto del servidor ASE (por defecto 5000).
+.PARAMETER Driver            Nombre del driver ODBC (por defecto 'Adaptive Server Enterprise').
+.PARAMETER Credencial        Credencial de la base. Si no se pasa y hace falta, se pide por pantalla.
+.PARAMETER Fecha             Día a consultar (por defecto, ayer).
+.PARAMETER OutputPath        Ruta del CSV de salida (por defecto .\Debitos_Pendientes.csv).
+.PARAMETER Timeout           Tiempo máximo de la consulta en segundos (por defecto 300).
+
+.EXAMPLE
+    .\Exportar-Pendientes.ps1 -Dsn BANKSYS -OutputPath .\Debitos_Pendientes.csv
+
+.EXAMPLE
+    .\Exportar-Pendientes.ps1 -Server srvase01 -Port 5000 -Fecha 2026-10-22
+#>
+#Requires -Version 5.1
+[CmdletBinding()]
+param(
+    [string]$Dsn,
+    [string]$ConnectionString,
+    [string]$Server,
+    [int]$Port = 5000,
+    [string]$Driver = 'Adaptive Server Enterprise',
+    [System.Management.Automation.PSCredential]$Credencial,
+    [datetime]$Fecha,
+    [string]$OutputPath = (Join-Path (Get-Location).Path 'Debitos_Pendientes.csv'),
+    [int]$Timeout = 300
+)
+
+$ErrorActionPreference = 'Stop'
+$inv = [System.Globalization.CultureInfo]::InvariantCulture
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
+function Write-Log {
+    param([string]$Mensaje, [string]$Nivel = 'INFO')
+    $color = 'Gray'
+    if ($Nivel -eq 'WARN') { $color = 'Yellow' } elseif ($Nivel -eq 'ERROR') { $color = 'Red' } elseif ($Nivel -eq 'OK') { $color = 'Green' }
+    Write-Host ('[{0}] {1}' -f $Nivel, $Mensaje) -ForegroundColor $color
+}
+
+function Format-CampoCsv {
+    # Valor en texto invariante, sin saltos de línea y con comillas si hace falta
+    param($Valor)
+    if ($null -eq $Valor -or $Valor -is [System.DBNull]) { return '' }
+    if ($Valor -is [datetime]) { $t = $Valor.ToString('d/M/yyyy HH:mm:ss.fff', $inv) }
+    elseif ($Valor -is [decimal] -or $Valor -is [double] -or $Valor -is [single]) { $t = ([System.IFormattable]$Valor).ToString($null, $inv) }
+    elseif ($Valor -is [byte[]]) { $t = '' }
+    else { $t = [string]$Valor }
+    $t = ($t -replace '[\r\n]+', ' ').Trim()
+    if ($t.IndexOfAny([char[]]@(',', '"')) -ge 0) { $t = '"' + $t.Replace('"', '""') + '"' }
+    return $t
+}
+
+$conn = $null
+try {
+    # Fechas de la consulta: ayer por defecto
+    if ($PSBoundParameters.ContainsKey('Fecha')) {
+        $selAyer = "select @ayer = '{0}'" -f $Fecha.ToString('yyyyMMdd', $inv)
+        $selHoy = 'select @hoy  = dateadd(dd, 1, @ayer)'
+        $diaTxt = $Fecha.ToString('dd/MM/yyyy', $inv)
+    }
+    else {
+        $selHoy = "select @hoy  = convert(datetime, convert(varchar(8), getdate(), 112))"
+        $selAyer = 'select @ayer = dateadd(dd, -1, @hoy)'
+        $diaTxt = (Get-Date).AddDays(-1).ToString('dd/MM/yyyy', $inv)
+    }
+    $sql = @"
+declare @hoy datetime, @ayer datetime
+$(if ($PSBoundParameters.ContainsKey('Fecha')) { $selAyer + "`r`n" + $selHoy } else { $selHoy + "`r`n" + $selAyer })
+
+select b.fecreal, b.tercod, b.succod, b.sistcod, b.moncod, b.cuecod, movcod, descdet, b.fecproceso, b.comnro, b.nromen, m.mentexto, b.importedeb, fecenlace, fecorigen
+From Banksys..tgl_deb_pendientes b
+inner join Banksys..tgt_transaccion a on b.paiscod = a.paiscod and
+b.bcocod = a.bcocod and
+b.sistcod = a.sistcod and
+b.trancod = a.trancod
+left outer join Banksys..tdoc_mensages m on b.nromen = m.nromen
+Where
+b.paiscod = 54 and
+b.bcocod = 312 and
+b.succod = 1 and
+a.tipofunc in (0,1)
+and a.movcod in (25030, 25031)
+and b.fecorigen >= @ayer
+and b.fecorigen <  @hoy
+
+order by b.fecorigen, b.fecreal, b.fecenlace, b.cuecod
+"@
+
+    # Cadena de conexión
+    if (-not $ConnectionString) {
+        if ($Dsn) { $cs = "DSN=$Dsn;" }
+        elseif ($Server) { $cs = "Driver={$Driver};Server=$Server;Port=$Port;" }
+        else { throw 'Indicá -Dsn, -Server o -ConnectionString para conectarte a la base.' }
+        if ($null -eq $Credencial) { $Credencial = Get-Credential -Message 'Usuario y contraseña de Sybase' }
+        $cs += 'UID={0};PWD={1};' -f $Credencial.UserName, $Credencial.GetNetworkCredential().Password
+    }
+    else { $cs = $ConnectionString }
+
+    $dir = Split-Path -Parent $OutputPath
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+
+    Write-Log "Conectando a Sybase para traer los débitos pendientes del $diaTxt..."
+    $conn = New-Object System.Data.Odbc.OdbcConnection($cs)
+    $conn.Open()
+    $cmd = $conn.CreateCommand()
+    $cmd.CommandText = $sql
+    $cmd.CommandTimeout = $Timeout
+    $reader = $cmd.ExecuteReader()
+
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    $writer = New-Object System.IO.StreamWriter($OutputPath, $false, $enc)
+    $filas = 0
+    try {
+        $n = $reader.FieldCount
+        if ($n -eq 0) { throw 'La consulta no devolvió columnas.' }
+        $cols = for ($i = 0; $i -lt $n; $i++) { $reader.GetName($i) }
+        $writer.Write(($cols -join ',') + "`r`n")
+        while ($reader.Read()) {
+            $campos = for ($i = 0; $i -lt $n; $i++) { Format-CampoCsv $reader.GetValue($i) }
+            $writer.Write(($campos -join ',') + "`r`n")
+            $filas++
+        }
+    }
+    finally {
+        $writer.Dispose()
+        $reader.Dispose()
+    }
+    if ($filas -eq 0) { Write-Log 'La consulta no devolvió filas; se guardó el CSV solo con el encabezado.' 'WARN' }
+    Write-Log ("{0} fila(s) guardadas en {1}" -f $filas, $OutputPath) 'OK'
+    exit 0
+}
+catch {
+    Write-Log ('Error: ' + $_.Exception.Message) 'ERROR'
+    exit 1
+}
+finally {
+    if ($null -ne $conn) { $conn.Dispose() }
+}
