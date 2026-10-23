@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Concilia las transferencias QNET contra las partidas de Loop y los débitos
     pendientes. Genera un Excel (o CSV de respaldo) y un dashboard HTML.
@@ -33,6 +33,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Acentos: la consola y el archivo en UTF-8 (el script se guarda con BOM para Windows PowerShell 5.1)
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
 # ---------------------------------------------------------------------------
 # Constantes y formato
