@@ -1,12 +1,12 @@
 ﻿<#
 .SYNOPSIS
-    Ejecuta la consulta de débitos pendientes en SAP Sybase (ASE) y guarda el resultado en un CSV.
+    Ejecuta en SAP Sybase (ASE) las consultas de débitos pendientes y de movimientos de Loop, y guarda cada resultado en un CSV.
 
 .DESCRIPTION
     Compatible con Windows PowerShell 5.1 y PowerShell 7. Usa ODBC (System.Data.Odbc), por lo que
     necesita el driver ODBC de Sybase/SAP ASE instalado con la misma arquitectura (32 o 64 bits)
-    que el PowerShell que se usa. Trae los débitos pendientes del día anterior (por fecorigen),
-    o del día indicado en -Fecha. El CSV queda listo para usar como -PendientesPath en
+    que el PowerShell que se usa. Trae los débitos pendientes (por fecorigen) y los movimientos de Loop (por fecmov)
+    del día anterior, o del día indicado en -Fecha. El CSVs quedan listos para usar como -PendientesPath y -LoopPath en
     Conciliacion-Loop.ps1 (fechas d/M/yyyy HH:mm:ss.fff, decimales con punto, UTF-8).
 
 .PARAMETER Dsn               Nombre del DSN ODBC ya configurado (opción más simple).
@@ -17,7 +17,8 @@
 .PARAMETER Usuario           Usuario de la base. Si se indica, la ventana emergente pide solo la clave.
 .PARAMETER Credencial        Credencial de la base. Si no se pasa, se pide la clave (y el usuario si falta) en una ventana emergente.
 .PARAMETER Fecha             Día a consultar (por defecto, ayer).
-.PARAMETER OutputPath        Ruta del CSV de salida (por defecto .\Debitos_Pendientes.csv).
+.PARAMETER OutputPath        Ruta del CSV de débitos pendientes (por defecto .\Debitos_Pendientes.csv).
+.PARAMETER LoopOutputPath    Ruta del CSV de movimientos de Loop (por defecto Movimientos_Loop.csv, junto al de pendientes).
 .PARAMETER Timeout           Tiempo máximo de la consulta en segundos (por defecto 300).
 
 .EXAMPLE
@@ -38,6 +39,7 @@ param(
     [System.Management.Automation.PSCredential]$Credencial,
     [datetime]$Fecha,
     [string]$OutputPath = (Join-Path (Get-Location).Path 'Debitos_Pendientes.csv'),
+    [string]$LoopOutputPath,
     [int]$Timeout = 300
 )
 
@@ -116,22 +118,48 @@ function Read-CredencialPopup {
     return (New-Object System.Management.Automation.PSCredential($usuario, $sec))
 }
 
+function Export-ConsultaCsv {
+    # Ejecuta una consulta (solo lectura) y la vuelca a un CSV; devuelve la cantidad de filas
+    param($Conexion, [string]$Sql, [string]$Ruta, [int]$TimeoutSeg)
+    $dir = Split-Path -Parent $Ruta
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+    $cmd = $Conexion.CreateCommand()
+    $cmd.CommandText = $Sql
+    $cmd.CommandTimeout = $TimeoutSeg
+    $reader = $cmd.ExecuteReader()
+    $writer = New-Object System.IO.StreamWriter($Ruta, $false, (New-Object System.Text.UTF8Encoding($false)))
+    $filas = 0
+    try {
+        $n = $reader.FieldCount
+        if ($n -eq 0) { throw 'La consulta no devolvió columnas.' }
+        $cols = for ($i = 0; $i -lt $n; $i++) { $reader.GetName($i) }
+        $writer.Write(($cols -join ',') + "`r`n")
+        while ($reader.Read()) {
+            $campos = for ($i = 0; $i -lt $n; $i++) { Format-CampoCsv $reader.GetValue($i) }
+            $writer.Write(($campos -join ',') + "`r`n")
+            $filas++
+        }
+    }
+    finally {
+        $writer.Dispose()
+        $reader.Dispose()
+    }
+    return $filas
+}
+
 $conn = $null
 try {
-    # Fechas de la consulta: ayer por defecto
+    # Mismo criterio de fechas para las dos consultas: ayer por defecto
     if ($PSBoundParameters.ContainsKey('Fecha')) {
-        $selAyer = "select @ayer = '{0}'" -f $Fecha.ToString('yyyyMMdd', $inv)
-        $selHoy = 'select @hoy  = dateadd(dd, 1, @ayer)'
+        $fechasSql = "declare @hoy datetime, @ayer datetime`r`nselect @ayer = '{0}'`r`nselect @hoy  = dateadd(dd, 1, @ayer)`r`n" -f $Fecha.ToString('yyyyMMdd', $inv)
         $diaTxt = $Fecha.ToString('dd/MM/yyyy', $inv)
     }
     else {
-        $selHoy = "select @hoy  = convert(datetime, convert(varchar(8), getdate(), 112))"
-        $selAyer = 'select @ayer = dateadd(dd, -1, @hoy)'
+        $fechasSql = "declare @hoy datetime, @ayer datetime`r`nselect @hoy  = convert(datetime, convert(varchar(8), getdate(), 112))`r`nselect @ayer = dateadd(dd, -1, @hoy)`r`n"
         $diaTxt = (Get-Date).AddDays(-1).ToString('dd/MM/yyyy', $inv)
     }
-    $sql = @"
-declare @hoy datetime, @ayer datetime
-$(if ($PSBoundParameters.ContainsKey('Fecha')) { $selAyer + "`r`n" + $selHoy } else { $selHoy + "`r`n" + $selAyer })
+
+    $sqlPendientes = $fechasSql + @"
 
 select b.fecreal, b.tercod, b.succod, b.sistcod, b.moncod, b.cuecod, movcod, descdet, b.fecproceso, b.comnro, b.nromen, m.mentexto, b.importedeb, fecenlace, fecorigen
 From Banksys..tgl_deb_pendientes b
@@ -152,6 +180,21 @@ and b.fecorigen <  @hoy
 order by b.fecorigen, b.fecreal, b.fecenlace, b.cuecod
 "@
 
+    $sqlLoop = $fechasSql + @"
+
+select  a.sistcod, a.moncod, a.cuecod, convert(varchar, a.fecmov, 103) 'Fecha_Mov', a.comnro, a.movcod, b.signo, b.accimp, b.signo * b.accimp 'Importe'
+from tgl_movimientos a, tgl_movimientos_aper b
+where
+a.fecmov >= @ayer
+and a.fecmov <  @hoy
+and a.concod = ' '
+and a.fecreal = b.fecreal
+and a.tercod = b.tercod
+and b.funcod = 1
+and a.movcod in (25030, 25031)
+order by a.comnro
+"@
+
     # Cadena de conexión
     if (-not $ConnectionString) {
         if ($Dsn) { $cs = "DSN=$Dsn;" }
@@ -162,37 +205,23 @@ order by b.fecorigen, b.fecreal, b.fecenlace, b.cuecod
     }
     else { $cs = $ConnectionString }
 
-    $dir = Split-Path -Parent $OutputPath
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
+    if (-not $LoopOutputPath) {
+        $carpeta = Split-Path -Parent $OutputPath
+        if (-not $carpeta) { $carpeta = (Get-Location).Path }
+        $LoopOutputPath = Join-Path $carpeta 'Movimientos_Loop.csv'
+    }
 
-    Write-Log "Conectando a Sybase para traer los débitos pendientes del $diaTxt..."
+    Write-Log "Conectando a Sybase para traer los datos del $diaTxt..."
     $conn = New-Object System.Data.Odbc.OdbcConnection($cs)
     $conn.Open()
-    $cmd = $conn.CreateCommand()
-    $cmd.CommandText = $sql
-    $cmd.CommandTimeout = $Timeout
-    $reader = $cmd.ExecuteReader()
 
-    $enc = New-Object System.Text.UTF8Encoding($false)
-    $writer = New-Object System.IO.StreamWriter($OutputPath, $false, $enc)
-    $filas = 0
-    try {
-        $n = $reader.FieldCount
-        if ($n -eq 0) { throw 'La consulta no devolvió columnas.' }
-        $cols = for ($i = 0; $i -lt $n; $i++) { $reader.GetName($i) }
-        $writer.Write(($cols -join ',') + "`r`n")
-        while ($reader.Read()) {
-            $campos = for ($i = 0; $i -lt $n; $i++) { Format-CampoCsv $reader.GetValue($i) }
-            $writer.Write(($campos -join ',') + "`r`n")
-            $filas++
-        }
-    }
-    finally {
-        $writer.Dispose()
-        $reader.Dispose()
-    }
-    if ($filas -eq 0) { Write-Log 'La consulta no devolvió filas; se guardó el CSV solo con el encabezado.' 'WARN' }
-    Write-Log ("{0} fila(s) guardadas en {1}" -f $filas, $OutputPath) 'OK'
+    $f1 = Export-ConsultaCsv -Conexion $conn -Sql $sqlPendientes -Ruta $OutputPath -TimeoutSeg $Timeout
+    if ($f1 -eq 0) { Write-Log 'Débitos pendientes: sin filas; se guardó el CSV solo con el encabezado.' 'WARN' }
+    Write-Log ('Débitos pendientes: {0} fila(s) guardadas en {1}' -f $f1, $OutputPath) 'OK'
+
+    $f2 = Export-ConsultaCsv -Conexion $conn -Sql $sqlLoop -Ruta $LoopOutputPath -TimeoutSeg $Timeout
+    if ($f2 -eq 0) { Write-Log 'Movimientos de Loop: sin filas; se guardó el CSV solo con el encabezado.' 'WARN' }
+    Write-Log ('Movimientos de Loop: {0} fila(s) guardadas en {1}' -f $f2, $LoopOutputPath) 'OK'
     exit 0
 }
 catch {
