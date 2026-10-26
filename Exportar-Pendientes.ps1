@@ -6,7 +6,7 @@
     Compatible con Windows PowerShell 5.1 y PowerShell 7. Usa ODBC (System.Data.Odbc), por lo que
     necesita el driver ODBC de Sybase/SAP ASE instalado con la misma arquitectura (32 o 64 bits)
     que el PowerShell que se usa. Trae los débitos pendientes (por fecorigen) y los movimientos de Loop (por fecmov)
-    del día anterior, o del día indicado en -Fecha. El CSVs quedan listos para usar como -PendientesPath y -LoopPath en
+    del día anterior (si hoy es lunes, desde el viernes hasta el domingo), o del día indicado en -Fecha. El CSVs quedan listos para usar como -PendientesPath y -LoopPath en
     Conciliacion-Loop.ps1 (fechas d/M/yyyy HH:mm:ss.fff, decimales con punto, UTF-8).
 
 .PARAMETER Dsn               Nombre del DSN ODBC ya configurado (opción más simple).
@@ -149,15 +149,20 @@ function Export-ConsultaCsv {
 
 $conn = $null
 try {
-    # Mismo criterio de fechas para las dos consultas: ayer por defecto
+    # Mismo criterio de fechas para las dos consultas: ayer por defecto; si hoy es lunes, desde el viernes (@hoy - 3)
     if ($PSBoundParameters.ContainsKey('Fecha')) {
-        $fechasSql = "declare @hoy datetime, @ayer datetime`r`nselect @ayer = '{0}'`r`nselect @hoy  = dateadd(dd, 1, @ayer)`r`n" -f $Fecha.ToString('yyyyMMdd', $inv)
-        $diaTxt = $Fecha.ToString('dd/MM/yyyy', $inv)
+        $desde = $Fecha.Date
+        $hasta = $desde.AddDays(1)
     }
     else {
-        $fechasSql = "declare @hoy datetime, @ayer datetime`r`nselect @hoy  = convert(datetime, convert(varchar(8), getdate(), 112))`r`nselect @ayer = dateadd(dd, -1, @hoy)`r`n"
-        $diaTxt = (Get-Date).AddDays(-1).ToString('dd/MM/yyyy', $inv)
+        $hasta = (Get-Date).Date
+        if ($hasta.DayOfWeek -eq [System.DayOfWeek]::Monday) { $desde = $hasta.AddDays(-3) }
+        else { $desde = $hasta.AddDays(-1) }
     }
+    $fechasSql = "declare @hoy datetime, @ayer datetime`r`nselect @hoy  = '{0}'`r`nselect @ayer = '{1}'`r`n" -f $hasta.ToString('yyyyMMdd', $inv), $desde.ToString('yyyyMMdd', $inv)
+    $ultimo = $hasta.AddDays(-1)
+    if ($desde -eq $ultimo) { $diaTxt = $desde.ToString('dd/MM/yyyy', $inv) }
+    else { $diaTxt = 'del {0} al {1}' -f $desde.ToString('dd/MM/yyyy', $inv), $ultimo.ToString('dd/MM/yyyy', $inv) }
 
     $sqlPendientes = $fechasSql + @"
 
@@ -211,7 +216,7 @@ order by a.comnro
         $LoopOutputPath = Join-Path $carpeta 'Movimientos_Loop.csv'
     }
 
-    Write-Log "Conectando a Sybase para traer los datos del $diaTxt..."
+    Write-Log "Conectando a Sybase para traer los datos: $diaTxt..."
     $conn = New-Object System.Data.Odbc.OdbcConnection($cs)
     $conn.Open()
 
