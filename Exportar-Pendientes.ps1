@@ -14,7 +14,7 @@
 .PARAMETER Server            Servidor ASE (si no se usa -Dsn ni -ConnectionString).
 .PARAMETER Port              Puerto del servidor ASE (por defecto 5000).
 .PARAMETER Driver            Nombre del driver ODBC (por defecto 'Adaptive Server Enterprise').
-.PARAMETER Credencial        Credencial de la base. Si no se pasa y hace falta, se pide por pantalla.
+.PARAMETER Credencial        Credencial de la base. Si no se pasa, se pide usuario y clave en una ventana emergente.
 .PARAMETER Fecha             Día a consultar (por defecto, ayer).
 .PARAMETER OutputPath        Ruta del CSV de salida (por defecto .\Debitos_Pendientes.csv).
 .PARAMETER Timeout           Tiempo máximo de la consulta en segundos (por defecto 300).
@@ -63,6 +63,56 @@ function Format-CampoCsv {
     return $t
 }
 
+function Read-CredencialPopup {
+    # Ventana emergente para pedir usuario y clave (la clave se muestra oculta)
+    param([string]$Titulo = 'Conexión a Sybase')
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+    }
+    catch { return Get-Credential -Message $Titulo }
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = $Titulo
+    $f.StartPosition = 'CenterScreen'
+    $f.FormBorderStyle = 'FixedDialog'
+    $f.MaximizeBox = $false
+    $f.MinimizeBox = $false
+    $f.TopMost = $true
+    $f.ClientSize = New-Object System.Drawing.Size(330, 140)
+    $lu = New-Object System.Windows.Forms.Label
+    $lu.Text = 'Usuario:'; $lu.Location = New-Object System.Drawing.Point(15, 20); $lu.AutoSize = $true
+    $tu = New-Object System.Windows.Forms.TextBox
+    $tu.Location = New-Object System.Drawing.Point(90, 17); $tu.Size = New-Object System.Drawing.Size(220, 22)
+    $lp = New-Object System.Windows.Forms.Label
+    $lp.Text = 'Clave:'; $lp.Location = New-Object System.Drawing.Point(15, 58); $lp.AutoSize = $true
+    $tp = New-Object System.Windows.Forms.TextBox
+    $tp.Location = New-Object System.Drawing.Point(90, 55); $tp.Size = New-Object System.Drawing.Size(220, 22)
+    $tp.UseSystemPasswordChar = $true
+    $ok = New-Object System.Windows.Forms.Button
+    $ok.Text = 'Aceptar'; $ok.Location = New-Object System.Drawing.Point(150, 98); $ok.Size = New-Object System.Drawing.Size(75, 28)
+    $ok.Add_Click({
+            if ($tu.Text.Trim() -eq '') { [void][System.Windows.Forms.MessageBox]::Show('Ingresá el usuario.', $Titulo) }
+            else { $f.DialogResult = [System.Windows.Forms.DialogResult]::OK; $f.Close() }
+        }.GetNewClosure())
+    $ca = New-Object System.Windows.Forms.Button
+    $ca.Text = 'Cancelar'; $ca.Location = New-Object System.Drawing.Point(235, 98); $ca.Size = New-Object System.Drawing.Size(75, 28)
+    $ca.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $f.AcceptButton = $ok
+    $f.CancelButton = $ca
+    $f.Controls.AddRange(@($lu, $tu, $lp, $tp, $ok, $ca))
+    $f.Add_Shown({ $f.Activate(); $tu.Focus() }.GetNewClosure())
+    $res = $f.ShowDialog()
+    if ($res -ne [System.Windows.Forms.DialogResult]::OK) { $f.Dispose(); throw 'Conexión cancelada por el usuario.' }
+    $sec = New-Object System.Security.SecureString
+    foreach ($ch in $tp.Text.ToCharArray()) { $sec.AppendChar($ch) }
+    $sec.MakeReadOnly()
+    $usuario = $tu.Text.Trim()
+    $tp.Text = ''
+    $f.Dispose()
+    return (New-Object System.Management.Automation.PSCredential($usuario, $sec))
+}
+
 $conn = $null
 try {
     # Fechas de la consulta: ayer por defecto
@@ -104,7 +154,7 @@ order by b.fecorigen, b.fecreal, b.fecenlace, b.cuecod
         if ($Dsn) { $cs = "DSN=$Dsn;" }
         elseif ($Server) { $cs = "Driver={$Driver};Server=$Server;Port=$Port;" }
         else { throw 'Indicá -Dsn, -Server o -ConnectionString para conectarte a la base.' }
-        if ($null -eq $Credencial) { $Credencial = Get-Credential -Message 'Usuario y contraseña de Sybase' }
+        if ($null -eq $Credencial) { $Credencial = Read-CredencialPopup -Titulo 'Conexión a Sybase' }
         $cs += 'UID={0};PWD={1};' -f $Credencial.UserName, $Credencial.GetNetworkCredential().Password
     }
     else { $cs = $ConnectionString }
