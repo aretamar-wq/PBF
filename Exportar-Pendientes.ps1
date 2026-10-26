@@ -6,7 +6,7 @@
     Compatible con Windows PowerShell 5.1 y PowerShell 7. Usa ODBC (System.Data.Odbc), por lo que
     necesita el driver ODBC de Sybase/SAP ASE instalado con la misma arquitectura (32 o 64 bits)
     que el PowerShell que se usa. Trae los débitos pendientes (por fecorigen) y los movimientos de Loop (por fecmov)
-    del día anterior (si hoy es lunes, desde el viernes hasta el domingo), o del día indicado en -Fecha. El CSVs quedan listos para usar como -PendientesPath y -LoopPath en
+    del día anterior (si hoy es lunes, desde el viernes hasta el domingo), o del día indicado en -Fecha. Sábados y domingos no se ejecuta (sale con código 0). El CSVs quedan listos para usar como -PendientesPath y -LoopPath en
     Conciliacion-Loop.ps1 (fechas d/M/yyyy HH:mm:ss.fff, decimales con punto, UTF-8).
 
 .PARAMETER Dsn               Nombre del DSN ODBC ya configurado (opción más simple).
@@ -156,6 +156,10 @@ try {
     }
     else {
         $hasta = (Get-Date).Date
+        if ($hasta.DayOfWeek -eq [System.DayOfWeek]::Saturday -or $hasta.DayOfWeek -eq [System.DayOfWeek]::Sunday) {
+            Write-Log 'Hoy es sábado o domingo: la extracción no se ejecuta (use -Fecha para forzar un día).' 'WARN'
+            exit 0
+        }
         if ($hasta.DayOfWeek -eq [System.DayOfWeek]::Monday) { $desde = $hasta.AddDays(-3) }
         else { $desde = $hasta.AddDays(-1) }
     }
