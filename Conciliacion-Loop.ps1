@@ -786,6 +786,11 @@ function Export-ExcelReport {
     }
 
     Import-Module ImportExcel
+    # Si ya existe el Excel del mismo día (corrida anterior) se reemplaza; si está abierto en Excel, avisa
+    if (Test-Path -LiteralPath $xlsx) {
+        try { Remove-Item -LiteralPath $xlsx -Force }
+        catch { throw "No se pudo reemplazar $xlsx. Cerralo si lo tenés abierto en Excel y volvé a ejecutar." }
+    }
     $pkg = New-Object OfficeOpenXml.ExcelPackage (New-Object System.IO.FileInfo $xlsx)
     try {
         $encabezadosExc = 'Tipo', 'Comprobante', 'Cuenta', 'Moneda', 'Fecha', 'Importe', 'Estado transfer', 'Débito pendiente', 'Detalle'
