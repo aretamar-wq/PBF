@@ -10,7 +10,7 @@
 
 .PARAMETER Fecha               Día a bajar y conciliar (dd/MM/yyyy o yyyy-MM-dd). Obligatorio.
 .PARAMETER FechaHasta          Último día del rango (por defecto, el mismo día).
-.PARAMETER TransferenciasPath  CSV de transferencias QNET (obligatorio).
+.PARAMETER TransferenciasPath  CSV de transferencias QNET (por defecto .\Movimientos_BankService.csv).
 .PARAMETER LoopBasePath        CSV base de Loop para completar el período anterior (opcional).
 .PARAMETER Dsn                 DSN ODBC de Sybase.
 .PARAMETER Server              Servidor ASE, si no se usa -Dsn ni -ConnectionString.
@@ -37,7 +37,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Fecha,
     [string]$FechaHasta,
-    [Parameter(Mandatory = $true)][string]$TransferenciasPath,
+    [string]$TransferenciasPath = (Join-Path (Get-Location).Path 'Movimientos_BankService.csv'),
     [string]$LoopBasePath,
     [string]$Dsn,
     [string]$ConnectionString,
@@ -57,5 +57,5 @@ if (-not (Test-Path -LiteralPath $principal)) {
     Write-Host "[ERROR] No se encuentra Conciliacion-Loop.ps1 en $PSScriptRoot (deben estar en la misma carpeta)." -ForegroundColor Red
     exit 1
 }
-& $principal -Descargar @PSBoundParameters
+& $principal @PSBoundParameters
 exit $LASTEXITCODE

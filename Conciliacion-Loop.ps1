@@ -1,75 +1,67 @@
 ﻿<#
 .SYNOPSIS
-    Todo en uno: baja de Sybase los débitos pendientes y los movimientos de Loop (opcional, con
-    -Descargar) y después concilia las transferencias QNET contra Loop y los débitos pendientes.
-    Genera un Excel (o CSV de respaldo) y un dashboard HTML.
+    Todo en uno: baja de Sybase los débitos pendientes y los movimientos de Loop y después concilia
+    las transferencias QNET contra Loop y los débitos pendientes. Genera un Excel (o CSV de respaldo)
+    y un HTML por día, y un dashboard general.
 
 .DESCRIPTION
-    Compatible con Windows PowerShell 5.1 y PowerShell 7.
-    Entradas: Loop (partidas), Débitos pendientes y Transferencias QNET (CSV).
+    Compatible con Windows PowerShell 5.1 y PowerShell 7. Siempre descarga primero:
+      - Debitos_Pendientes.csv: todos los débitos pendientes.
+      - Movimientos_Loop.csv: desde el último día hábil anterior hasta ayer (lunes: desde el viernes).
+        No se ejecuta en fines de semana ni feriados (lista 2026 en $script:Feriados).
+    Los CSV bajados quedan en <OutputDir>\Entrada. Después se concilian con el archivo de transferencias.
     Salidas: un Excel y un HTML por día en <OutputDir>\Diario (Conciliacion_Loop_<yyyyMMdd>.xlsx/.html)
     y un dashboard general (Conciliacion_Loop_General.html) con filtro por fechas, que se arma
     leyendo los datos embebidos en los HTML diarios de esa carpeta.
     Código de salida: 0 si no hubo excepciones de ejecución, 1 si las hubo.
     No se vuelcan nombres, CUIT ni CBU en las salidas.
+    Los valores de conexión (Server, Usuario, etc.) se pueden dejar fijos en el bloque CONFIGURACIÓN del param.
 
-.PARAMETER LoopPath            CSV de Loop (obligatorio).
-.PARAMETER PendientesPath      CSV de débitos pendientes (obligatorio).
-.PARAMETER TransferenciasPath  CSV de transferencias QNET (obligatorio).
+.PARAMETER Server              Servidor ASE (o -Dsn / -ConnectionString).
+.PARAMETER Usuario             Usuario de Sybase; la clave se pide en una ventana emergente.
+.PARAMETER TransferenciasPath  CSV de transferencias QNET (por defecto .\Movimientos_BankService.csv).
 .PARAMETER LoopBasePath        CSV base de Loop para completar el período anterior (opcional).
+.PARAMETER OutputDir           Carpeta de salida (por defecto, la carpeta actual).
+.PARAMETER Fecha               Día puntual a bajar (dd/MM/yyyy o yyyy-MM-dd). Sin esto: desde el último día hábil anterior.
+.PARAMETER FechaHasta          Con -Fecha, último día del rango a bajar (por defecto, el mismo día).
+.PARAMETER Dsn                 DSN ODBC de Sybase.
+.PARAMETER Port                Puerto ASE (por defecto 5000).
+.PARAMETER Driver              Driver ODBC (por defecto 'Adaptive Server Enterprise').
+.PARAMETER ConnectionString    Cadena de conexión ODBC completa.
+.PARAMETER Credencial          Credencial ya armada (evita la ventana).
+.PARAMETER Timeout             Segundos máximos por consulta (por defecto 300).
+.PARAMETER DescargaDir         Carpeta de los CSV bajados (por defecto <OutputDir>\Entrada).
 .PARAMETER IncluirPeriodo      Genera además el Excel y el HTML de todo el período.
 .PARAMETER SoloGeneral         Solo reconstruye el dashboard general desde los HTML diarios existentes.
-.PARAMETER OutputDir           Carpeta de salida (por defecto, la carpeta actual).
-.PARAMETER Descargar           Paso 1: baja Debitos_Pendientes.csv y Movimientos_Loop.csv de Sybase y los usa
-                               como -PendientesPath y -LoopPath (no se pasan esos dos parámetros).
-.PARAMETER Dsn                 (con -Descargar) DSN ODBC de Sybase.
-.PARAMETER Server              (con -Descargar) Servidor ASE, si no se usa -Dsn ni -ConnectionString.
-.PARAMETER Port                (con -Descargar) Puerto ASE (por defecto 5000).
-.PARAMETER Driver              (con -Descargar) Driver ODBC (por defecto 'Adaptive Server Enterprise').
-.PARAMETER ConnectionString    (con -Descargar) Cadena de conexión ODBC completa.
-.PARAMETER Usuario             (con -Descargar) Usuario de Sybase; la clave se pide en una ventana emergente.
-.PARAMETER Credencial          (con -Descargar) Credencial ya armada (evita la ventana).
-.PARAMETER Fecha               (con -Descargar) Día puntual a bajar (dd/MM/yyyy o yyyy-MM-dd). Sin esto: desde el último día hábil anterior.
-.PARAMETER FechaHasta          (con -Descargar) Con -Fecha, último día del rango a bajar (por defecto, el mismo día).
-.PARAMETER Timeout             (con -Descargar) Segundos máximos por consulta (por defecto 300).
-.PARAMETER DescargaDir         (con -Descargar) Carpeta de los CSV bajados (por defecto <OutputDir>\Entrada).
 
 .EXAMPLE
-    .\Conciliacion-Loop.ps1 -LoopPath .\SQL14.csv -LoopBasePath .\Tr_Loop_116261.csv `
-        -PendientesPath .\SQL15.csv `
-        -TransferenciasPath .\transferencias-qnet-2026-10-01_2026-10-23.csv `
-        -OutputDir .\salida
+    .\Conciliacion-Loop.ps1 -Server NOMBRE_O_IP -Usuario TU_USUARIO -OutputDir .\salida
 
 .EXAMPLE
-    # Todo en uno: baja de Sybase y concilia (sábados y domingos no se ejecuta)
-    .\Conciliacion-Loop.ps1 -Descargar -Server NOMBRE_O_IP -Usuario TU_USUARIO `
-        -TransferenciasPath .\Movimientos_BankService.csv -OutputDir .\salida
+    # Con Server y Usuario ya fijados en el script
+    .\Conciliacion-Loop.ps1 -OutputDir .\salida
 #>
 #Requires -Version 5.1
 [CmdletBinding(DefaultParameterSetName = 'Conciliar')]
 param(
-    [Parameter(Mandatory = $true, ParameterSetName = 'Conciliar')][string]$LoopPath,
-    [Parameter(Mandatory = $true, ParameterSetName = 'Conciliar')][string]$PendientesPath,
-    [Parameter(Mandatory = $true, ParameterSetName = 'Conciliar')]
-    [Parameter(Mandatory = $true, ParameterSetName = 'Completo')][string]$TransferenciasPath,
-    [Parameter(ParameterSetName = 'Conciliar')]
-    [Parameter(ParameterSetName = 'Completo')][string]$LoopBasePath,
-    [Parameter(ParameterSetName = 'Conciliar')]
-    [Parameter(ParameterSetName = 'Completo')][switch]$IncluirPeriodo,
-    [Parameter(Mandatory = $true, ParameterSetName = 'Completo')][switch]$Descargar,
-    [Parameter(ParameterSetName = 'Completo')][string]$Dsn,
-    [Parameter(ParameterSetName = 'Completo')][string]$ConnectionString,
-    [Parameter(ParameterSetName = 'Completo')][string]$Server,
-    [Parameter(ParameterSetName = 'Completo')][int]$Port = 5000,
-    [Parameter(ParameterSetName = 'Completo')][string]$Driver = 'Adaptive Server Enterprise',
-    [Parameter(ParameterSetName = 'Completo')][string]$Usuario,
-    [Parameter(ParameterSetName = 'Completo')][System.Management.Automation.PSCredential]$Credencial,
-    [Parameter(ParameterSetName = 'Completo')][string]$Fecha,
-    [Parameter(ParameterSetName = 'Completo')][string]$FechaHasta,
-    [Parameter(ParameterSetName = 'Completo')][int]$Timeout = 300,
-    [Parameter(ParameterSetName = 'Completo')][string]$DescargaDir,
-    [Parameter(Mandatory = $true, ParameterSetName = 'General')][switch]$SoloGeneral,
-    [string]$OutputDir = (Get-Location).Path
+    # ---- CONFIGURACIÓN: completá estos valores una vez y no hace falta pasarlos al ejecutar ----
+    [string]$Server = '',                       # Servidor Sybase (o usar -Dsn / -ConnectionString)
+    [int]$Port = 5000,
+    [string]$Dsn = '',                          # DSN ODBC, si se prefiere en lugar de Server
+    [string]$Driver = 'Adaptive Server Enterprise',
+    [string]$Usuario = '',                      # Usuario de Sybase; la clave se pide en una ventana emergente
+    [string]$TransferenciasPath = (Join-Path (Get-Location).Path 'Movimientos_BankService.csv'),
+    [string]$LoopBasePath = '',                 # CSV base de Loop (opcional)
+    [string]$OutputDir = (Get-Location).Path,
+    # ---- Opcionales ----
+    [string]$ConnectionString,
+    [System.Management.Automation.PSCredential]$Credencial,
+    [string]$Fecha,
+    [string]$FechaHasta,
+    [int]$Timeout = 300,
+    [string]$DescargaDir,
+    [switch]$IncluirPeriodo,
+    [Parameter(Mandatory = $true, ParameterSetName = 'General')][switch]$SoloGeneral
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1531,7 +1523,7 @@ order by a.comnro
     if (-not $ConnectionString) {
         if ($Dsn) { $cs = "DSN=$Dsn;" }
         elseif ($Server) { $cs = "Driver={$Driver};Server=$Server;Port=$Port;" }
-        else { throw 'Para bajar los archivos indicá -Dsn, -Server o -ConnectionString.' }
+        else { throw 'Falta la conexión a Sybase: completá Server (o Dsn) en el bloque CONFIGURACIÓN al inicio del script, o pasá -Server / -Dsn / -ConnectionString.' }
         if ($null -eq $Credencial) { $Credencial = Read-CredencialPopup -Titulo 'Conexión a Sybase' -Usuario $Usuario }
         $cs += 'UID={0};PWD={1};' -f $Credencial.UserName, $Credencial.GetNetworkCredential().Password
     }
@@ -1565,26 +1557,24 @@ try {
         $null = Export-DashboardGeneral -OutputDir (Resolve-Path -LiteralPath $OutputDir).Path
         exit 0
     }
-    if ($Descargar) {
-        if (-not (Test-Path -LiteralPath $OutputDir)) { $null = New-Item -ItemType Directory -Path $OutputDir -Force }
-        if (-not $DescargaDir) { $DescargaDir = Join-Path (Resolve-Path -LiteralPath $OutputDir).Path 'Entrada' }
-        $fechaDia = $null; $fechaFin = $null
-        $fmtsFecha = @('dd/MM/yyyy', 'd/M/yyyy', 'yyyy-MM-dd')
-        if ($Fecha) {
-            $fechaDia = Convert-Fecha $Fecha $fmtsFecha
-            if ($null -eq $fechaDia) { throw "Fecha inválida '$Fecha' (use dd/MM/yyyy o yyyy-MM-dd)." }
-        }
-        if ($FechaHasta) {
-            if (-not $Fecha) { throw '-FechaHasta requiere -Fecha.' }
-            $fechaFin = Convert-Fecha $FechaHasta $fmtsFecha
-            if ($null -eq $fechaFin) { throw "FechaHasta inválida '$FechaHasta' (use dd/MM/yyyy o yyyy-MM-dd)." }
-        }
-        $bajados = Invoke-Descarga -Carpeta $DescargaDir -FechaDia $fechaDia -FechaFin $fechaFin -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
-        if ($null -eq $bajados) { exit 0 }
-        $LoopPath = $bajados.Loop
-        $PendientesPath = $bajados.Pendientes
-        Write-Log 'Paso 2: conciliación.'
+    if (-not (Test-Path -LiteralPath $OutputDir)) { $null = New-Item -ItemType Directory -Path $OutputDir -Force }
+    if (-not $DescargaDir) { $DescargaDir = Join-Path (Resolve-Path -LiteralPath $OutputDir).Path 'Entrada' }
+    $fechaDia = $null; $fechaFin = $null
+    $fmtsFecha = @('dd/MM/yyyy', 'd/M/yyyy', 'yyyy-MM-dd')
+    if ($Fecha) {
+        $fechaDia = Convert-Fecha $Fecha $fmtsFecha
+        if ($null -eq $fechaDia) { throw "Fecha inválida '$Fecha' (use dd/MM/yyyy o yyyy-MM-dd)." }
     }
+    if ($FechaHasta) {
+        if (-not $Fecha) { throw '-FechaHasta requiere -Fecha.' }
+        $fechaFin = Convert-Fecha $FechaHasta $fmtsFecha
+        if ($null -eq $fechaFin) { throw "FechaHasta inválida '$FechaHasta' (use dd/MM/yyyy o yyyy-MM-dd)." }
+    }
+    $bajados = Invoke-Descarga -Carpeta $DescargaDir -FechaDia $fechaDia -FechaFin $fechaFin -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
+    if ($null -eq $bajados) { exit 0 }
+    $LoopPath = $bajados.Loop
+    $PendientesPath = $bajados.Pendientes
+    Write-Log 'Paso 2: conciliación.'
     Write-Log 'Inicio de la conciliación.'
     $loop = Read-Loop -Path $LoopPath
     $base = $null
