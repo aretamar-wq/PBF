@@ -45,11 +45,11 @@
 [CmdletBinding(DefaultParameterSetName = 'Conciliar')]
 param(
     # ---- CONFIGURACIÓN: completá estos valores una vez y no hace falta pasarlos al ejecutar ----
-    [string]$Server = '',                       # Servidor Sybase (o usar -Dsn / -ConnectionString)
+    [string]$Server = 'aconquija1',                       # Servidor Sybase (o usar -Dsn / -ConnectionString)
     [int]$Port = 5000,
     [string]$Dsn = '',                          # DSN ODBC, si se prefiere en lugar de Server
     [string]$Driver = 'Adaptive Server Enterprise',
-    [string]$Usuario = '',                      # Usuario de Sybase; la clave se pide en una ventana emergente
+    [string]$Usuario = 'SRV_CONCILIACIONES',                      # Usuario de Sybase; la clave se pide en una ventana emergente
     [string]$TransferenciasPath = (Join-Path (Get-Location).Path 'Movimientos_BankService.csv'),
     [string]$LoopBasePath = '',                 # CSV base de Loop (opcional)
     [string]$OutputDir = (Join-Path $PSScriptRoot 'salida'),   # Carpeta de salida fija (junto al script)
