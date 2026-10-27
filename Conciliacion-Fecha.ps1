@@ -22,7 +22,7 @@
 .PARAMETER Timeout             Segundos máximos por consulta (por defecto 300).
 .PARAMETER DescargaDir         Carpeta de los CSV bajados (por defecto <OutputDir>\Entrada).
 .PARAMETER IncluirPeriodo      Genera además el Excel y el HTML de todo el período.
-.PARAMETER OutputDir           Carpeta de salida (por defecto, la carpeta actual).
+.PARAMETER OutputDir           Carpeta de salida (por defecto, la carpeta 'salida' junto al script).
 
 .EXAMPLE
     .\Conciliacion-Fecha.ps1 -Fecha 26/10/2026 -Server NOMBRE_O_IP -Usuario TU_USUARIO `
@@ -49,7 +49,7 @@ param(
     [int]$Timeout = 300,
     [string]$DescargaDir,
     [switch]$IncluirPeriodo,
-    [string]$OutputDir = (Get-Location).Path
+    [string]$OutputDir = (Join-Path $PSScriptRoot 'salida')
 )
 
 $principal = Join-Path $PSScriptRoot 'Conciliacion-Loop.ps1'

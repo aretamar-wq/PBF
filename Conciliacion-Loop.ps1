@@ -6,10 +6,10 @@
 
 .DESCRIPTION
     Compatible con Windows PowerShell 5.1 y PowerShell 7. Siempre descarga primero:
-      - Debitos_Pendientes.csv: todos los débitos pendientes.
-      - Movimientos_Loop.csv: desde el último día hábil anterior hasta ayer (lunes: desde el viernes).
+      - Debitos_Pendientes_<yyyyMMdd>.csv: todos los débitos pendientes.
+      - Movimientos_Loop_<yyyyMMdd>.csv: desde el último día hábil anterior hasta ayer (lunes: desde el viernes).
         No se ejecuta en fines de semana ni feriados (lista 2026 en $script:Feriados).
-    Los CSV bajados quedan en <OutputDir>\Entrada. Después se concilian con el archivo de transferencias.
+    Los CSV bajados quedan en <OutputDir>\Entrada con la fecha de la corrida en el nombre. Después se concilian con el archivo de transferencias.
     Salidas: un Excel y un HTML por día en <OutputDir>\Diario (Conciliacion_Loop_<yyyyMMdd>.xlsx/.html)
     y un dashboard general (Conciliacion_Loop_General.html) con filtro por fechas, que se arma
     leyendo los datos embebidos en los HTML diarios de esa carpeta.
@@ -21,7 +21,7 @@
 .PARAMETER Usuario             Usuario de Sybase; la clave se pide en una ventana emergente.
 .PARAMETER TransferenciasPath  CSV de transferencias QNET (por defecto .\Movimientos_BankService.csv).
 .PARAMETER LoopBasePath        CSV base de Loop para completar el período anterior (opcional).
-.PARAMETER OutputDir           Carpeta de salida (por defecto, la carpeta actual).
+.PARAMETER OutputDir           Carpeta de salida (por defecto, la carpeta 'salida' junto al script).
 .PARAMETER Fecha               Día puntual a bajar (dd/MM/yyyy o yyyy-MM-dd). Sin esto: desde el último día hábil anterior.
 .PARAMETER FechaHasta          Con -Fecha, último día del rango a bajar (por defecto, el mismo día).
 .PARAMETER Dsn                 DSN ODBC de Sybase.
@@ -52,7 +52,7 @@ param(
     [string]$Usuario = '',                      # Usuario de Sybase; la clave se pide en una ventana emergente
     [string]$TransferenciasPath = (Join-Path (Get-Location).Path 'Movimientos_BankService.csv'),
     [string]$LoopBasePath = '',                 # CSV base de Loop (opcional)
-    [string]$OutputDir = (Get-Location).Path,
+    [string]$OutputDir = (Join-Path $PSScriptRoot 'salida'),   # Carpeta de salida fija (junto al script)
     # ---- Opcionales ----
     [string]$ConnectionString,
     [System.Management.Automation.PSCredential]$Credencial,
@@ -1530,8 +1530,10 @@ order by a.comnro
     else { $cs = $ConnectionString }
 
     if (-not (Test-Path -LiteralPath $Carpeta)) { $null = New-Item -ItemType Directory -Path $Carpeta -Force }
-    $rutaPend = Join-Path $Carpeta 'Debitos_Pendientes.csv'
-    $rutaLoop = Join-Path $Carpeta 'Movimientos_Loop.csv'
+    # Archivos bajados con la fecha de la corrida en el nombre (queda el historial)
+    $sufijo = (Get-Date).ToString('yyyyMMdd', $script:Inv)
+    $rutaPend = Join-Path $Carpeta "Debitos_Pendientes_$sufijo.csv"
+    $rutaLoop = Join-Path $Carpeta "Movimientos_Loop_$sufijo.csv"
 
     Write-Log "Paso 1: conectando a Sybase (débitos pendientes: todos; movimientos de Loop: $diaTxt)..."
     $conn = New-Object System.Data.Odbc.OdbcConnection($cs)
