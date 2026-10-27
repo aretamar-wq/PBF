@@ -29,7 +29,8 @@
 .PARAMETER ConnectionString    (con -Descargar) Cadena de conexión ODBC completa.
 .PARAMETER Usuario             (con -Descargar) Usuario de Sybase; la clave se pide en una ventana emergente.
 .PARAMETER Credencial          (con -Descargar) Credencial ya armada (evita la ventana).
-.PARAMETER Fecha               (con -Descargar) Día puntual a bajar (por defecto, desde el último día hábil anterior; lunes: desde el viernes).
+.PARAMETER Fecha               (con -Descargar) Día puntual a bajar (dd/MM/yyyy o yyyy-MM-dd). Sin esto: desde el último día hábil anterior.
+.PARAMETER FechaHasta          (con -Descargar) Con -Fecha, último día del rango a bajar (por defecto, el mismo día).
 .PARAMETER Timeout             (con -Descargar) Segundos máximos por consulta (por defecto 300).
 .PARAMETER DescargaDir         (con -Descargar) Carpeta de los CSV bajados (por defecto <OutputDir>\Entrada).
 
@@ -63,7 +64,8 @@ param(
     [Parameter(ParameterSetName = 'Completo')][string]$Driver = 'Adaptive Server Enterprise',
     [Parameter(ParameterSetName = 'Completo')][string]$Usuario,
     [Parameter(ParameterSetName = 'Completo')][System.Management.Automation.PSCredential]$Credencial,
-    [Parameter(ParameterSetName = 'Completo')][datetime]$Fecha,
+    [Parameter(ParameterSetName = 'Completo')][string]$Fecha,
+    [Parameter(ParameterSetName = 'Completo')][string]$FechaHasta,
     [Parameter(ParameterSetName = 'Completo')][int]$Timeout = 300,
     [Parameter(ParameterSetName = 'Completo')][string]$DescargaDir,
     [Parameter(Mandatory = $true, ParameterSetName = 'General')][switch]$SoloGeneral,
@@ -1465,10 +1467,15 @@ function Get-MotivoNoHabil {
 function Invoke-Descarga {
     # Baja de Sybase (solo lectura) todos los débitos pendientes y los movimientos de Loop del período a CSV.
     # Fechas: desde el último día hábil anterior hasta ayer (lunes: desde el viernes). No se ejecuta en fines de semana ni feriados.
-    param([string]$Carpeta, $FechaDia, [string]$Dsn, [string]$ConnectionString, [string]$Server, [int]$Port, [string]$Driver, [string]$Usuario, $Credencial, [int]$TimeoutSeg)
+    param([string]$Carpeta, $FechaDia, $FechaFin, [string]$Dsn, [string]$ConnectionString, [string]$Server, [int]$Port, [string]$Driver, [string]$Usuario, $Credencial, [int]$TimeoutSeg)
     if ($null -ne $FechaDia) {
         $desde = ([datetime]$FechaDia).Date
         $hasta = $desde.AddDays(1)
+        if ($null -ne $FechaFin) {
+            $fin = ([datetime]$FechaFin).Date
+            if ($fin -lt $desde) { throw 'FechaHasta no puede ser anterior a Fecha.' }
+            $hasta = $fin.AddDays(1)
+        }
     }
     else {
         $hasta = (Get-Date).Date
@@ -1561,9 +1568,18 @@ try {
     if ($Descargar) {
         if (-not (Test-Path -LiteralPath $OutputDir)) { $null = New-Item -ItemType Directory -Path $OutputDir -Force }
         if (-not $DescargaDir) { $DescargaDir = Join-Path (Resolve-Path -LiteralPath $OutputDir).Path 'Entrada' }
-        $fechaDia = $null
-        if ($PSBoundParameters.ContainsKey('Fecha')) { $fechaDia = $Fecha }
-        $bajados = Invoke-Descarga -Carpeta $DescargaDir -FechaDia $fechaDia -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
+        $fechaDia = $null; $fechaFin = $null
+        $fmtsFecha = @('dd/MM/yyyy', 'd/M/yyyy', 'yyyy-MM-dd')
+        if ($Fecha) {
+            $fechaDia = Convert-Fecha $Fecha $fmtsFecha
+            if ($null -eq $fechaDia) { throw "Fecha inválida '$Fecha' (use dd/MM/yyyy o yyyy-MM-dd)." }
+        }
+        if ($FechaHasta) {
+            if (-not $Fecha) { throw '-FechaHasta requiere -Fecha.' }
+            $fechaFin = Convert-Fecha $FechaHasta $fmtsFecha
+            if ($null -eq $fechaFin) { throw "FechaHasta inválida '$FechaHasta' (use dd/MM/yyyy o yyyy-MM-dd)." }
+        }
+        $bajados = Invoke-Descarga -Carpeta $DescargaDir -FechaDia $fechaDia -FechaFin $fechaFin -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
         if ($null -eq $bajados) { exit 0 }
         $LoopPath = $bajados.Loop
         $PendientesPath = $bajados.Pendientes
