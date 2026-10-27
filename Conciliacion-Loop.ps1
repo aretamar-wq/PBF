@@ -1463,7 +1463,7 @@ function Get-MotivoNoHabil {
 }
 
 function Invoke-Descarga {
-    # Baja de Sybase (solo lectura) los débitos pendientes y los movimientos de Loop a CSV.
+    # Baja de Sybase (solo lectura) todos los débitos pendientes y los movimientos de Loop del período a CSV.
     # Fechas: desde el último día hábil anterior hasta ayer (lunes: desde el viernes). No se ejecuta en fines de semana ni feriados.
     param([string]$Carpeta, $FechaDia, [string]$Dsn, [string]$ConnectionString, [string]$Server, [int]$Port, [string]$Driver, [string]$Usuario, $Credencial, [int]$TimeoutSeg)
     if ($null -ne $FechaDia) {
@@ -1487,8 +1487,8 @@ function Invoke-Descarga {
     else { $diaTxt = 'del {0} al {1}' -f (Format-Fecha $desde), (Format-Fecha $ultimo) }
     $fechasSql = "declare @hoy datetime, @ayer datetime`r`nselect @hoy  = '{0}'`r`nselect @ayer = '{1}'`r`n" -f $hasta.ToString('yyyyMMdd', $script:Inv), $desde.ToString('yyyyMMdd', $script:Inv)
 
-    $sqlPendientes = $fechasSql + @"
-
+    # Débitos pendientes: se consultan todos (sin filtro de fecha)
+    $sqlPendientes = @"
 select b.fecreal, b.tercod, b.succod, b.sistcod, b.moncod, b.cuecod, movcod, descdet, b.fecproceso, b.comnro, b.nromen, m.mentexto, b.importedeb, fecenlace, fecorigen
 From Banksys..tgl_deb_pendientes b
 inner join Banksys..tgt_transaccion a on b.paiscod = a.paiscod and
@@ -1502,8 +1502,6 @@ b.bcocod = 312 and
 b.succod = 1 and
 a.tipofunc in (0,1)
 and a.movcod in (25030, 25031)
-and b.fecorigen >= @ayer
-and b.fecorigen <  @hoy
 
 order by b.fecorigen, b.fecreal, b.fecenlace, b.cuecod
 "@
@@ -1536,7 +1534,7 @@ order by a.comnro
     $rutaPend = Join-Path $Carpeta 'Debitos_Pendientes.csv'
     $rutaLoop = Join-Path $Carpeta 'Movimientos_Loop.csv'
 
-    Write-Log "Paso 1: conectando a Sybase para bajar los archivos ($diaTxt)..."
+    Write-Log "Paso 1: conectando a Sybase (débitos pendientes: todos; movimientos de Loop: $diaTxt)..."
     $conn = New-Object System.Data.Odbc.OdbcConnection($cs)
     try {
         $conn.Open()
