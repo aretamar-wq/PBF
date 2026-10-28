@@ -1,0 +1,17 @@
+# Archivos PBF de BASE24 (contienen datos bancarios reales)
+*.dat
+*.pbf
+*_out
+PBF_*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editores / SO
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
