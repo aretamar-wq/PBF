@@ -32,8 +32,11 @@
 .PARAMETER Timeout             Segundos máximos por consulta (por defecto 300).
 .PARAMETER DescargaDir         Carpeta de los CSV bajados (por defecto <OutputDir>\Entrada).
 .PARAMETER IncluirPeriodo      Genera además el Excel y el HTML de todo el período.
-.PARAMETER Carpeta             Sin descargar: lee de la carpeta todos los Movimientos_Loop*.csv, el Debitos_Pendientes*.csv más reciente
-                               y todos los Movimientos_BankService*.csv, y genera el dashboard.
+.PARAMETER DesdeCarpetas       Sin descargar: lee todos los Movimientos_Loop*.csv de -CarpetaLoop, el Debitos_Pendientes*.csv más
+                               reciente de -CarpetaDP y todos los Movimientos_BankService*.csv de -CarpetaBS, y genera el dashboard.
+.PARAMETER CarpetaLoop         Carpeta de los Loop (por defecto, 'entrada_loop' junto al script).
+.PARAMETER CarpetaDP           Carpeta de los débitos pendientes (por defecto, 'entrada_DP' junto al script).
+.PARAMETER CarpetaBS           Carpeta de las transferencias BankService (por defecto, 'entrada_bs' junto al script).
 .PARAMETER SoloGeneral         Solo reconstruye el dashboard general desde los HTML diarios existentes.
 
 .EXAMPLE
@@ -46,8 +49,9 @@
     .\Conciliacion-Loop.ps1 -Fecha 20/10/2026 -FechaHasta 23/10/2026
 
 .EXAMPLE
-    # Sin descargar: dashboard desde todos los archivos de una carpeta
-    .\Conciliacion-Loop.ps1 -Carpeta C:\Conciliacion\Entrada
+    # Sin descargar: dashboard desde los archivos de entrada_loop, entrada_DP y entrada_bs
+    .\Conciliacion-Loop.ps1 -DesdeCarpetas
+    .\Conciliacion-Loop.ps1 -DesdeCarpetas -CarpetaLoop D:\loop -CarpetaDP D:\dp -CarpetaBS D:\bs
 
 .EXAMPLE
     # Solo rearmar el dashboard general desde los HTML diarios existentes
@@ -72,7 +76,10 @@ param(
     [string]$FechaHasta,
     [int]$Timeout = 300,
     [string]$DescargaDir,
-    [string]$Carpeta,                           # Si se indica, no descarga: lee todos los archivos de esa carpeta
+    [switch]$DesdeCarpetas,                     # No descarga: lee los archivos de las tres carpetas de abajo
+    [string]$CarpetaLoop = (Join-Path $PSScriptRoot 'entrada_loop'),   # Movimientos_Loop*.csv
+    [string]$CarpetaDP = (Join-Path $PSScriptRoot 'entrada_DP'),       # Debitos_Pendientes*.csv
+    [string]$CarpetaBS = (Join-Path $PSScriptRoot 'entrada_bs'),       # Movimientos_BankService*.csv
     [switch]$IncluirPeriodo,
     [Parameter(Mandatory = $true, ParameterSetName = 'General')][switch]$SoloGeneral
 )
@@ -1568,18 +1575,27 @@ order by a.comnro
     return [pscustomobject]@{ Loop = $rutaLoop; Pendientes = $rutaPend }
 }
 
+function Get-ArchivosCsv {
+    # CSV de una carpeta por patrón de nombre; si ninguno coincide, usa todos los .csv de la carpeta
+    param([string]$Carpeta, [string]$Patron, [string]$Rotulo)
+    if (-not (Test-Path -LiteralPath $Carpeta -PathType Container)) { throw "No existe la carpeta de $Rotulo`: $Carpeta" }
+    $todos = @(Get-ChildItem -LiteralPath $Carpeta -File -Filter '*.csv')
+    $f = @($todos | Where-Object { $_.Name -like $Patron })
+    if ($f.Count -eq 0 -and $todos.Count -gt 0) {
+        Write-Log "No hay archivos $Patron en $Carpeta; se usan todos los .csv de la carpeta." 'WARN'
+        $f = $todos
+    }
+    if ($f.Count -eq 0) { throw "No hay archivos CSV de $Rotulo en $Carpeta" }
+    return $f
+}
+
 function Read-Carpeta {
-    # Lee todos los archivos de una carpeta: Movimientos_Loop*.csv, Debitos_Pendientes*.csv y Movimientos_BankService*.csv
-    param([string]$Carpeta)
-    if (-not (Test-Path -LiteralPath $Carpeta -PathType Container)) { throw "No existe la carpeta: $Carpeta" }
-    $archivos = @(Get-ChildItem -LiteralPath $Carpeta -File)
-    $fLoop = @($archivos | Where-Object { $_.Name -like 'Movimientos_Loop*.csv' } | Sort-Object Name)
-    $fPend = @($archivos | Where-Object { $_.Name -like 'Debitos_Pendientes*.csv' } | Sort-Object LastWriteTime, Name)
-    $fTr = @($archivos | Where-Object { $_.Name -like 'Movimientos_BankService*.csv' } | Sort-Object Name)
-    if ($fLoop.Count -eq 0) { throw "No hay archivos Movimientos_Loop*.csv en $Carpeta" }
-    if ($fPend.Count -eq 0) { throw "No hay archivos Debitos_Pendientes*.csv en $Carpeta" }
-    if ($fTr.Count -eq 0) { throw "No hay archivos Movimientos_BankService*.csv en $Carpeta" }
-    Write-Log ('Carpeta {0}: {1} archivo(s) de Loop, {2} de débitos pendientes, {3} de transferencias.' -f $Carpeta, $fLoop.Count, $fPend.Count, $fTr.Count)
+    # Lee los archivos de tres carpetas: Loop, débitos pendientes y transferencias BankService
+    param([string]$CarpetaLoop, [string]$CarpetaDP, [string]$CarpetaBS)
+    $fLoop = @(Get-ArchivosCsv $CarpetaLoop 'Movimientos_Loop*.csv' 'Loop' | Sort-Object Name)
+    $fPend = @(Get-ArchivosCsv $CarpetaDP 'Debitos_Pendientes*.csv' 'débitos pendientes' | Sort-Object LastWriteTime, Name)
+    $fTr = @(Get-ArchivosCsv $CarpetaBS 'Movimientos_BankService*.csv' 'transferencias' | Sort-Object Name)
+    Write-Log ('Archivos de entrada: {0} de Loop ({1}), {2} de débitos pendientes ({3}), {4} de transferencias ({5}).' -f $fLoop.Count, $CarpetaLoop, $fPend.Count, $CarpetaDP, $fTr.Count, $CarpetaBS)
 
     # Loop: se unen los archivos; si dos traen el mismo día, vale el más nuevo (por nombre)
     $leidos = New-Object 'System.Collections.Generic.List[object]'
@@ -1635,12 +1651,12 @@ try {
         exit 0
     }
     if (-not (Test-Path -LiteralPath $OutputDir)) { $null = New-Item -ItemType Directory -Path $OutputDir -Force }
-    if ($Carpeta) {
-        $datos = Read-Carpeta -Carpeta $Carpeta
+    if ($DesdeCarpetas) {
+        $datos = Read-Carpeta -CarpetaLoop $CarpetaLoop -CarpetaDP $CarpetaDP -CarpetaBS $CarpetaBS
         $loop = $datos.Loop; $pend = $datos.Pendientes; $trans = $datos.Transferencias
         $base = $null
         if ($LoopBasePath) { $base = Read-Loop -Path $LoopBasePath }
-        Write-Log 'Inicio de la conciliación (archivos de la carpeta).'
+        Write-Log 'Inicio de la conciliación (archivos de las carpetas de entrada).'
         $loopFinal = Merge-Loop -Loop $loop -Base $base
     }
     else {
