@@ -37,11 +37,21 @@
 .PARAMETER SoloGeneral         Solo reconstruye el dashboard general desde los HTML diarios existentes.
 
 .EXAMPLE
-    .\Conciliacion-Loop.ps1 -Server NOMBRE_O_IP -Usuario TU_USUARIO -OutputDir .\salida
+    # Normal: baja de Sybase (desde el último día hábil anterior hasta ayer) y concilia
+    .\Conciliacion-Loop.ps1
 
 .EXAMPLE
-    # Con Server y Usuario ya fijados en el script
-    .\Conciliacion-Loop.ps1 -OutputDir .\salida
+    # Una fecha (o un rango) puntual
+    .\Conciliacion-Loop.ps1 -Fecha 26/10/2026
+    .\Conciliacion-Loop.ps1 -Fecha 20/10/2026 -FechaHasta 23/10/2026
+
+.EXAMPLE
+    # Sin descargar: dashboard desde todos los archivos de una carpeta
+    .\Conciliacion-Loop.ps1 -Carpeta C:\Conciliacion\Entrada
+
+.EXAMPLE
+    # Solo rearmar el dashboard general desde los HTML diarios existentes
+    .\Conciliacion-Loop.ps1 -SoloGeneral
 #>
 #Requires -Version 5.1
 [CmdletBinding(DefaultParameterSetName = 'Conciliar')]
