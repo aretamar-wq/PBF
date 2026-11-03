@@ -32,6 +32,8 @@
 .PARAMETER Timeout             Segundos máximos por consulta (por defecto 300).
 .PARAMETER DescargaDir         Carpeta de los CSV bajados (por defecto <OutputDir>\Entrada).
 .PARAMETER IncluirPeriodo      Genera además el Excel y el HTML de todo el período.
+.PARAMETER Carpeta             Sin descargar: lee de la carpeta todos los Movimientos_Loop*.csv, el Debitos_Pendientes*.csv más reciente
+                               y todos los Movimientos_BankService*.csv, y genera el dashboard.
 .PARAMETER SoloGeneral         Solo reconstruye el dashboard general desde los HTML diarios existentes.
 
 .EXAMPLE
@@ -60,6 +62,7 @@ param(
     [string]$FechaHasta,
     [int]$Timeout = 300,
     [string]$DescargaDir,
+    [string]$Carpeta,                           # Si se indica, no descarga: lee todos los archivos de esa carpeta
     [switch]$IncluirPeriodo,
     [Parameter(Mandatory = $true, ParameterSetName = 'General')][switch]$SoloGeneral
 )
@@ -358,7 +361,7 @@ function Read-Transferencias {
             }
             if ($com -eq '') { throw 'comprobante vacío' }
             if ($null -eq $monto) { throw 'monto inválido' }
-            if ($estado -ne 'APPROVED' -and $estado -ne 'FAILED') { throw "estado desconocido '$estado'" }
+            if ($estado -notmatch '^[A-Z_]+$') { throw "estado inválido '$estado'" }
             $cbu = ([string]$cbuRaw) -replace '\D', ''
             $cuenta = $null; $tipoCta = $null
             if ($cbu.Length -ge 21) {
@@ -388,7 +391,8 @@ function Read-Transferencias {
     $corte = $null
     foreach ($x in $rows) { if ($null -ne $x.Ejecutada -and ($null -eq $corte -or $x.Ejecutada -gt $corte)) { $corte = $x.Ejecutada } }
     $ap = @($rows | Where-Object { $_.Estado -eq 'APPROVED' }).Count
-    Write-Log ("{0}: {1} operaciones ({2} APPROVED, {3} FAILED). Corte: {4}." -f $csv.Archivo, $rows.Count, $ap, ($rows.Count - $ap), $(if ($corte) { $corte.ToString('dd/MM/yyyy HH:mm', $script:Inv) } else { 'sin datos' }))
+    $fa = @($rows | Where-Object { $_.Estado -eq 'FAILED' }).Count
+    Write-Log ("{0}: {1} operaciones ({2} APPROVED, {3} FAILED, {4} otros estados). Corte: {5}." -f $csv.Archivo, $rows.Count, $ap, $fa, ($rows.Count - $ap - $fa), $(if ($corte) { $corte.ToString('dd/MM/yyyy HH:mm', $script:Inv) } else { 'sin datos' }))
     return [pscustomobject]@{ Rows = $rows; Corte = $corte; Archivo = $csv.Archivo }
 }
 
@@ -577,6 +581,7 @@ function Get-Conciliacion {
 
     # Cruce de transfers contra Loop
     $det = New-Object 'System.Collections.Generic.List[object]'
+    $otros = 0
     $enLoop = 0; $failSin = 0; $apSin = 0; $apPend = 0; $apFuera = 0; $cbuMal = 0
     foreach ($t in $Transfers.Rows) {
         if ($t.CbuOk -eq $false) {
@@ -585,6 +590,7 @@ function Get-Conciliacion {
             $hall.Add((New-Hallazgo 'CBU origen no corresponde a la moneda' $t.Comnro $t.Cuenta $t.Mon $t.Fecha $t.Monto $t.Estado $null ("Dígitos 9 y 10 del CBU origen = '{0}', se esperaba '{1}'" -f $t.TipoCta, $esp)))
         }
         if ($porComnro.ContainsKey($t.Comnro)) { $enLoop++; $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'EnLoop' }); continue }
+        if ($t.Estado -ne 'APPROVED' -and $t.Estado -ne 'FAILED') { $otros++; $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'Otro' }); continue }
         if ($t.Estado -eq 'FAILED') { $failSin++; $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'FailedSin' }); continue }
         if ($null -eq $t.Fecha) { $apSin++; $det.Add([pscustomobject]@{ Fecha = $null; Clase = 'ApprovedSin' }); $hall.Add((New-Hallazgo 'APPROVED sin registro' $t.Comnro $t.Cuenta $t.Mon $null $t.Monto 'APPROVED' $null 'APPROVED sin fecha y sin asiento en Loop')); continue }
         if ($t.Fecha -ge $loopMax) { $apPend++; $det.Add([pscustomobject]@{ Fecha = $t.Fecha; Clase = 'ApprovedPend' }) }
@@ -639,7 +645,7 @@ function Get-Conciliacion {
         LoopMin = $loopMin; LoopMax = $loopMax; Corte = $corte
         Cruce = [pscustomobject]@{
             Total = $Transfers.Rows.Count; EnLoop = $enLoop; FailedSinRegistro = $failSin; ApprovedSinRegistro = $apSin
-            ApprovedPendientes = $apPend; ApprovedFuera = $apFuera; CbuMoneda = $cbuMal
+            ApprovedPendientes = $apPend; ApprovedFuera = $apFuera; OtrosEstados = $otros; CbuMoneda = $cbuMal
         }
         PendientesPosteriores = $pendFuturos
         PendientesTotal = $pDict.Count
@@ -702,6 +708,7 @@ function Get-BloquesResumen {
                 @('APPROVED sin registro', $x.ApprovedSinRegistro),
                 @('APPROVED pendientes de contabilizar', $x.ApprovedPendientes),
                 @('APPROVED fuera del período', $x.ApprovedFuera),
+                @('Otros estados sin registro (ej. PENDING_EXECUTION)', $x.OtrosEstados),
                 @('Pendientes posteriores al último día de Loop', $Conc.PendientesPosteriores)
             )
     })
@@ -1050,6 +1057,7 @@ function Export-HtmlDashboard {
     & $ap (& $tile 'APPROVED sin registro' $x.ApprovedSinRegistro ($x.ApprovedSinRegistro -gt 0) '')
     & $ap (& $tile 'APPROVED pendientes de contabilizar' $x.ApprovedPendientes $false 'No son excepción')
     & $ap (& $tile 'APPROVED fuera del período' $x.ApprovedFuera $false '')
+    & $ap (& $tile 'Otros estados sin registro' $x.OtrosEstados $false 'Ej. PENDING_EXECUTION; no son excepción')
     & $ap '</div>'
 
     & $ap '<h2>Transferencias Loop por fecha</h2><div class="card">'
@@ -1157,7 +1165,7 @@ function Get-DatosDia {
         dos     = @($Conc.Comprobantes | Where-Object { $_.Partidas -eq 2 }).Count
         pesos   = @{ neto = (& $d2 $tp.Neto); pend = (& $d2 $tp.Pendientes) }
         usd     = @{ neto = (& $d2 $tu.Neto); pend = (& $d2 $tu.Pendientes) }
-        cruce   = @{ total = $x.Total; enLoop = $x.EnLoop; failedSin = $x.FailedSinRegistro; approvedSin = $x.ApprovedSinRegistro; approvedPend = $x.ApprovedPendientes; approvedFuera = $x.ApprovedFuera }
+        cruce   = @{ total = $x.Total; enLoop = $x.EnLoop; failedSin = $x.FailedSinRegistro; approvedSin = $x.ApprovedSinRegistro; approvedPend = $x.ApprovedPendientes; approvedFuera = $x.ApprovedFuera; otros = $x.OtrosEstados }
         pendDia = @{ cantP = $cantP; pesos = (& $d2 $sumP); cantU = $cantU; usd = (& $d2 $sumU) }
         exc     = $exc
     }
@@ -1187,7 +1195,7 @@ function Get-ConciliacionDia {
         Comprobantes = $comps; Hallazgos = $hall; Totales = $tot; LoopMin = $Dia; LoopMax = $Dia; Corte = $Conc.Corte
         Cruce = [pscustomobject]@{
             Total = $det.Count; EnLoop = (& $cuenta 'EnLoop'); FailedSinRegistro = (& $cuenta 'FailedSin'); ApprovedSinRegistro = (& $cuenta 'ApprovedSin')
-            ApprovedPendientes = (& $cuenta 'ApprovedPend'); ApprovedFuera = (& $cuenta 'ApprovedFuera')
+            ApprovedPendientes = (& $cuenta 'ApprovedPend'); ApprovedFuera = (& $cuenta 'ApprovedFuera'); OtrosEstados = (& $cuenta 'Otro')
             CbuMoneda = @($hall | Where-Object { $_.Tipo -eq 'CBU origen no corresponde a la moneda' }).Count
         }
         PendientesPosteriores = 0; PendientesTotal = @($comps | Where-Object { $null -ne $_.PendImporte }).Count
@@ -1311,11 +1319,11 @@ function excepciones(){
 function render(){
   var d=el('desde').value,h=el('hasta').value;
   sel=D.filter(function(x){var f=x.datos.fecha;return (!d||f>=d)&&(!h||f<=h);});
-  var s={ok:0,pend:0,pendDist:0,una:0,dist:0,mas2:0,dos:0,nExc:0,pNeto:0,pPend:0,uNeto:0,uPend:0,total:0,enLoop:0,failedSin:0,approvedSin:0,approvedPend:0,approvedFuera:0};
+  var s={ok:0,pend:0,pendDist:0,una:0,dist:0,mas2:0,dos:0,nExc:0,pNeto:0,pPend:0,uNeto:0,uPend:0,total:0,enLoop:0,failedSin:0,approvedSin:0,approvedPend:0,approvedFuera:0,otros:0};
   sel.forEach(function(x){var o=x.datos,m=o.marcas,c=o.cruce;
     s.ok+=m.ok||0;s.pend+=m.pend||0;s.pendDist+=m.pendDist||0;s.una+=m.una||0;s.dist+=m.dist||0;s.mas2+=m.mas2||0;s.dos+=o.dos||0;s.nExc+=(o.exc||[]).length;
     s.pNeto+=num(o.pesos.neto);s.pPend+=num(o.pesos.pend);s.uNeto+=num(o.usd.neto);s.uPend+=num(o.usd.pend);
-    s.total+=c.total||0;s.enLoop+=c.enLoop||0;s.failedSin+=c.failedSin||0;s.approvedSin+=c.approvedSin||0;s.approvedPend+=c.approvedPend||0;s.approvedFuera+=c.approvedFuera||0;});
+    s.total+=c.total||0;s.enLoop+=c.enLoop||0;s.failedSin+=c.failedSin||0;s.approvedSin+=c.approvedSin||0;s.approvedPend+=c.approvedPend||0;s.approvedFuera+=c.approvedFuera||0;s.otros+=c.otros||0;});
   var sinP=s.pNeto-s.pPend,sinU=s.uNeto-s.uPend;
   var rango=sel.length?(sel.length===1?fdate(sel[0].datos.fecha):fdate(sel[0].datos.fecha)+' al '+fdate(sel[sel.length-1].datos.fecha)):'sin días';
   el('frase').textContent=sel.length+' día(s) ('+rango+'): '+s.pend+' comprobantes con débito pendiente, '+s.nExc+' excepciones y '+money(sinP)+' / '+money(sinU,true)+' sin cubrir.';
@@ -1323,7 +1331,7 @@ function render(){
   tiles('t2',[['Neto en Loop - Pesos',money(s.pNeto),false],['Pendientes - Pesos',money(s.pPend),false],['Sin cubrir - Pesos',money(sinP),Math.abs(sinP)>0.005],
     ['Neto en Loop - USD',money(s.uNeto,true),false],['Pendientes - USD',money(s.uPend,true),false],['Sin cubrir - USD',money(sinU,true),Math.abs(sinU)>0.005]]);
   tiles('t3',[['Operaciones',s.total,false],['Encontradas en Loop',s.enLoop,false],['FAILED sin registro',s.failedSin,false],['APPROVED sin registro',s.approvedSin,s.approvedSin>0],
-    ['APPROVED pendientes de contabilizar',s.approvedPend,false,'No son excepción'],['APPROVED fuera del período',s.approvedFuera,false]]);
+    ['APPROVED pendientes de contabilizar',s.approvedPend,false,'No son excepción'],['APPROVED fuera del período',s.approvedFuera,false],['Otros estados sin registro',s.otros,false,'Ej. PENDING_EXECUTION; no son excepción']]);
   chart();
   var aP=0,aU=0,cP=0,cU=0,tP=0,tU=0;
   var filas=sel.map(function(x){var p=x.datos.pendDia;aP+=num(p.pesos);aU+=num(p.usd);cP+=p.cantP||0;cU+=p.cantU||0;
@@ -1550,6 +1558,63 @@ order by a.comnro
     return [pscustomobject]@{ Loop = $rutaLoop; Pendientes = $rutaPend }
 }
 
+function Read-Carpeta {
+    # Lee todos los archivos de una carpeta: Movimientos_Loop*.csv, Debitos_Pendientes*.csv y Movimientos_BankService*.csv
+    param([string]$Carpeta)
+    if (-not (Test-Path -LiteralPath $Carpeta -PathType Container)) { throw "No existe la carpeta: $Carpeta" }
+    $archivos = @(Get-ChildItem -LiteralPath $Carpeta -File)
+    $fLoop = @($archivos | Where-Object { $_.Name -like 'Movimientos_Loop*.csv' } | Sort-Object Name)
+    $fPend = @($archivos | Where-Object { $_.Name -like 'Debitos_Pendientes*.csv' } | Sort-Object LastWriteTime, Name)
+    $fTr = @($archivos | Where-Object { $_.Name -like 'Movimientos_BankService*.csv' } | Sort-Object Name)
+    if ($fLoop.Count -eq 0) { throw "No hay archivos Movimientos_Loop*.csv en $Carpeta" }
+    if ($fPend.Count -eq 0) { throw "No hay archivos Debitos_Pendientes*.csv en $Carpeta" }
+    if ($fTr.Count -eq 0) { throw "No hay archivos Movimientos_BankService*.csv en $Carpeta" }
+    Write-Log ('Carpeta {0}: {1} archivo(s) de Loop, {2} de débitos pendientes, {3} de transferencias.' -f $Carpeta, $fLoop.Count, $fPend.Count, $fTr.Count)
+
+    # Loop: se unen los archivos; si dos traen el mismo día, vale el más nuevo (por nombre)
+    $leidos = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($f in $fLoop) {
+        try { $leidos.Add((Read-Loop -Path $f.FullName)) }
+        catch {
+            if ($_.Exception.Message -like '*sin filas válidas*') { Write-Log "$($f.Name): sin filas válidas, se omite." 'WARN' }
+            else { throw }
+        }
+    }
+    if ($leidos.Count -eq 0) { throw 'Ningún archivo de Loop tiene filas válidas.' }
+    $dueno = @{}
+    for ($i = 0; $i -lt $leidos.Count; $i++) {
+        foreach ($r in $leidos[$i].Rows) { $dueno[$r.Fecha.ToString('yyyyMMdd', $script:Inv)] = $i }
+    }
+    $rows = New-Object 'System.Collections.Generic.List[object]'
+    $descartadas = 0
+    for ($i = 0; $i -lt $leidos.Count; $i++) {
+        foreach ($r in $leidos[$i].Rows) {
+            if ($dueno[$r.Fecha.ToString('yyyyMMdd', $script:Inv)] -eq $i) { $rows.Add($r) } else { $descartadas++ }
+        }
+    }
+    if ($descartadas -gt 0) { Write-Log "$descartadas partida(s) de Loop repetidas entre archivos (mismo día): se usa el archivo más nuevo." 'WARN' }
+    $mn = $rows[0].Fecha; $mx = $rows[0].Fecha
+    foreach ($x in $rows) { if ($x.Fecha -lt $mn) { $mn = $x.Fecha }; if ($x.Fecha -gt $mx) { $mx = $x.Fecha } }
+    $loop = [pscustomobject]@{ Rows = $rows; Min = $mn; Max = $mx; Archivo = ('{0} archivo(s) Movimientos_Loop' -f $leidos.Count) }
+    Write-Log ('Loop: {0} partidas, {1} a {2}.' -f $rows.Count, (Format-Fecha $mn), (Format-Fecha $mx))
+
+    # Débitos pendientes: es una foto completa, se usa el archivo más reciente
+    $ultimoPend = $fPend[$fPend.Count - 1]
+    if ($fPend.Count -gt 1) { Write-Log "Hay $($fPend.Count) archivos de débitos pendientes: se usa el más reciente ($($ultimoPend.Name))." 'WARN' }
+    $pend = Read-Pendientes -Path $ultimoPend.FullName
+
+    # Transferencias: se unen todos los archivos
+    $trRows = New-Object 'System.Collections.Generic.List[object]'
+    $corte = $null
+    foreach ($f in $fTr) {
+        $t = Read-Transferencias -Path $f.FullName
+        foreach ($r in $t.Rows) { $trRows.Add($r) }
+        if ($null -ne $t.Corte -and ($null -eq $corte -or $t.Corte -gt $corte)) { $corte = $t.Corte }
+    }
+    $trans = [pscustomobject]@{ Rows = $trRows; Corte = $corte; Archivo = ('{0} archivo(s) Movimientos_BankService' -f $fTr.Count) }
+    return [pscustomobject]@{ Loop = $loop; Pendientes = $pend; Transferencias = $trans }
+}
+
 # ---------------------------------------------------------------------------
 # Programa principal
 # ---------------------------------------------------------------------------
@@ -1560,30 +1625,40 @@ try {
         exit 0
     }
     if (-not (Test-Path -LiteralPath $OutputDir)) { $null = New-Item -ItemType Directory -Path $OutputDir -Force }
-    if (-not $DescargaDir) { $DescargaDir = Join-Path (Resolve-Path -LiteralPath $OutputDir).Path 'Entrada' }
-    $fechaDia = $null; $fechaFin = $null
-    $fmtsFecha = @('dd/MM/yyyy', 'd/M/yyyy', 'yyyy-MM-dd')
-    if ($Fecha) {
-        $fechaDia = Convert-Fecha $Fecha $fmtsFecha
-        if ($null -eq $fechaDia) { throw "Fecha inválida '$Fecha' (use dd/MM/yyyy o yyyy-MM-dd)." }
+    if ($Carpeta) {
+        $datos = Read-Carpeta -Carpeta $Carpeta
+        $loop = $datos.Loop; $pend = $datos.Pendientes; $trans = $datos.Transferencias
+        $base = $null
+        if ($LoopBasePath) { $base = Read-Loop -Path $LoopBasePath }
+        Write-Log 'Inicio de la conciliación (archivos de la carpeta).'
+        $loopFinal = Merge-Loop -Loop $loop -Base $base
     }
-    if ($FechaHasta) {
-        if (-not $Fecha) { throw '-FechaHasta requiere -Fecha.' }
-        $fechaFin = Convert-Fecha $FechaHasta $fmtsFecha
-        if ($null -eq $fechaFin) { throw "FechaHasta inválida '$FechaHasta' (use dd/MM/yyyy o yyyy-MM-dd)." }
+    else {
+        if (-not $DescargaDir) { $DescargaDir = Join-Path (Resolve-Path -LiteralPath $OutputDir).Path 'Entrada' }
+        $fechaDia = $null; $fechaFin = $null
+        $fmtsFecha = @('dd/MM/yyyy', 'd/M/yyyy', 'yyyy-MM-dd')
+        if ($Fecha) {
+            $fechaDia = Convert-Fecha $Fecha $fmtsFecha
+            if ($null -eq $fechaDia) { throw "Fecha inválida '$Fecha' (use dd/MM/yyyy o yyyy-MM-dd)." }
+        }
+        if ($FechaHasta) {
+            if (-not $Fecha) { throw '-FechaHasta requiere -Fecha.' }
+            $fechaFin = Convert-Fecha $FechaHasta $fmtsFecha
+            if ($null -eq $fechaFin) { throw "FechaHasta inválida '$FechaHasta' (use dd/MM/yyyy o yyyy-MM-dd)." }
+        }
+        $bajados = Invoke-Descarga -Carpeta $DescargaDir -FechaDia $fechaDia -FechaFin $fechaFin -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
+        if ($null -eq $bajados) { exit 0 }
+        $LoopPath = $bajados.Loop
+        $PendientesPath = $bajados.Pendientes
+        Write-Log 'Paso 2: conciliación.'
+        Write-Log 'Inicio de la conciliación.'
+        $loop = Read-Loop -Path $LoopPath
+        $base = $null
+        if ($LoopBasePath) { $base = Read-Loop -Path $LoopBasePath }
+        $loopFinal = Merge-Loop -Loop $loop -Base $base
+        $pend = Read-Pendientes -Path $PendientesPath
+        $trans = Read-Transferencias -Path $TransferenciasPath
     }
-    $bajados = Invoke-Descarga -Carpeta $DescargaDir -FechaDia $fechaDia -FechaFin $fechaFin -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
-    if ($null -eq $bajados) { exit 0 }
-    $LoopPath = $bajados.Loop
-    $PendientesPath = $bajados.Pendientes
-    Write-Log 'Paso 2: conciliación.'
-    Write-Log 'Inicio de la conciliación.'
-    $loop = Read-Loop -Path $LoopPath
-    $base = $null
-    if ($LoopBasePath) { $base = Read-Loop -Path $LoopBasePath }
-    $loopFinal = Merge-Loop -Loop $loop -Base $base
-    $pend = Read-Pendientes -Path $PendientesPath
-    $trans = Read-Transferencias -Path $TransferenciasPath
 
     $conc = Get-Conciliacion -Loop $loopFinal -Pendientes $pend -Transfers $trans
     $exc = Get-Excepciones -Conc $conc
