@@ -1,57 +1,51 @@
 ﻿<#
 .SYNOPSIS
-    Todo en uno: baja de Sybase los débitos pendientes y los movimientos de Loop y después concilia
-    las transferencias QNET contra Loop y los débitos pendientes. Genera un Excel (o CSV de respaldo)
-    y un HTML por día, y un dashboard general.
+    Concilia las transferencias QNET (BankService) contra Loop y los débitos pendientes y genera
+    un Excel (o CSV de respaldo) y un HTML por día, más un dashboard general con filtro por fechas.
 
 .DESCRIPTION
-    Compatible con Windows PowerShell 5.1 y PowerShell 7. Siempre descarga primero:
-      - Debitos_Pendientes_<yyyyMMdd>.csv: todos los débitos pendientes.
-      - Movimientos_Loop_<yyyyMMdd>.csv: desde el último día hábil anterior hasta ayer (lunes: desde el viernes).
-        No se ejecuta en fines de semana ni feriados (lista 2026 en $script:Feriados).
-    Los CSV bajados quedan en <OutputDir>\Entrada con la fecha de la corrida en el nombre. Después se concilian con el archivo de transferencias.
-    Salidas: un Excel y un HTML por día en <OutputDir>\Diario (Conciliacion_Loop_<yyyyMMdd>.xlsx/.html)
-    y un dashboard general (Conciliacion_Loop_General.html) con filtro por fechas, que se arma
-    leyendo los datos embebidos en los HTML diarios de esa carpeta.
+    Compatible con Windows PowerShell 5.1 y PowerShell 7. Sin parámetros, levanta automáticamente los
+    archivos de tres carpetas (por defecto, junto al script):
+      - entrada_loop : todos los Movimientos_Loop*.csv (si dos traen el mismo día, vale el más nuevo).
+      - entrada_DP   : el Debitos_Pendientes*.csv más reciente.
+      - entrada_bs   : todos los Movimientos_BankService*.csv.
+    Con -Descargar (o -Fecha) primero baja de Sybase los débitos pendientes (todos) y los movimientos de Loop
+    (desde el último día hábil anterior hasta ayer; lunes: desde el viernes; no se ejecuta en fines de semana
+    ni feriados, lista 2026 en $script:Feriados) y los guarda con la fecha en el nombre en entrada_DP y
+    entrada_loop; después concilia con lo que hay en las carpetas.
+    Salidas en <OutputDir> (por defecto, 'salida' junto al script): Diario\Conciliacion_Loop_<yyyyMMdd>.xlsx/.html
+    y Conciliacion_Loop_General.html (dashboard general, se arma leyendo los HTML diarios).
     Código de salida: 0 si no hubo excepciones de ejecución, 1 si las hubo.
     No se vuelcan nombres, CUIT ni CBU en las salidas.
-    Los valores de conexión (Server, Usuario, etc.) se pueden dejar fijos en el bloque CONFIGURACIÓN del param.
+    Los valores fijos (carpetas, Server, Usuario, etc.) se configuran en el bloque CONFIGURACIÓN del param.
 
-.PARAMETER Server              Servidor ASE (o -Dsn / -ConnectionString).
-.PARAMETER Usuario             Usuario de Sybase; la clave se pide en una ventana emergente.
-.PARAMETER TransferenciasPath  CSV de transferencias QNET (por defecto .\Movimientos_BankService.csv).
-.PARAMETER LoopBasePath        CSV base de Loop para completar el período anterior (opcional).
-.PARAMETER OutputDir           Carpeta de salida (por defecto, la carpeta 'salida' junto al script).
-.PARAMETER Fecha               Día puntual a bajar (dd/MM/yyyy o yyyy-MM-dd). Sin esto: desde el último día hábil anterior.
+.PARAMETER Descargar           Baja primero de Sybase (clave en una ventana emergente) y después concilia.
+.PARAMETER Fecha               Día puntual a bajar (dd/MM/yyyy o yyyy-MM-dd); implica -Descargar.
 .PARAMETER FechaHasta          Con -Fecha, último día del rango a bajar (por defecto, el mismo día).
-.PARAMETER Dsn                 DSN ODBC de Sybase.
-.PARAMETER Port                Puerto ASE (por defecto 5000).
-.PARAMETER Driver              Driver ODBC (por defecto 'Adaptive Server Enterprise').
-.PARAMETER ConnectionString    Cadena de conexión ODBC completa.
-.PARAMETER Credencial          Credencial ya armada (evita la ventana).
-.PARAMETER Timeout             Segundos máximos por consulta (por defecto 300).
-.PARAMETER DescargaDir         Carpeta de los CSV bajados (por defecto <OutputDir>\Entrada).
-.PARAMETER IncluirPeriodo      Genera además el Excel y el HTML de todo el período.
-.PARAMETER DesdeCarpetas       Sin descargar: lee todos los Movimientos_Loop*.csv de -CarpetaLoop, el Debitos_Pendientes*.csv más
-                               reciente de -CarpetaDP y todos los Movimientos_BankService*.csv de -CarpetaBS, y genera el dashboard.
 .PARAMETER CarpetaLoop         Carpeta de los Loop (por defecto, 'entrada_loop' junto al script).
 .PARAMETER CarpetaDP           Carpeta de los débitos pendientes (por defecto, 'entrada_DP' junto al script).
 .PARAMETER CarpetaBS           Carpeta de las transferencias BankService (por defecto, 'entrada_bs' junto al script).
+.PARAMETER LoopBasePath        CSV base de Loop para completar el período anterior (opcional).
+.PARAMETER OutputDir           Carpeta de salida (por defecto, 'salida' junto al script).
+.PARAMETER Server              (con -Descargar) Servidor ASE (o -Dsn / -ConnectionString).
+.PARAMETER Usuario             (con -Descargar) Usuario de Sybase.
+.PARAMETER Dsn                 (con -Descargar) DSN ODBC de Sybase.
+.PARAMETER Port                (con -Descargar) Puerto ASE (por defecto 5000).
+.PARAMETER Driver              (con -Descargar) Driver ODBC (por defecto 'Adaptive Server Enterprise').
+.PARAMETER ConnectionString    (con -Descargar) Cadena de conexión ODBC completa.
+.PARAMETER Credencial          (con -Descargar) Credencial ya armada (evita la ventana).
+.PARAMETER Timeout             (con -Descargar) Segundos máximos por consulta (por defecto 300).
+.PARAMETER IncluirPeriodo      Genera además el Excel y el HTML de todo el período.
 .PARAMETER SoloGeneral         Solo reconstruye el dashboard general desde los HTML diarios existentes.
 
 .EXAMPLE
-    # Normal: baja de Sybase (desde el último día hábil anterior hasta ayer) y concilia
+    # Normal: levanta los archivos de entrada_loop, entrada_DP y entrada_bs
     .\Conciliacion-Loop.ps1
 
 .EXAMPLE
-    # Una fecha (o un rango) puntual
-    .\Conciliacion-Loop.ps1 -Fecha 26/10/2026
-    .\Conciliacion-Loop.ps1 -Fecha 20/10/2026 -FechaHasta 23/10/2026
-
-.EXAMPLE
-    # Sin descargar: dashboard desde los archivos de entrada_loop, entrada_DP y entrada_bs
-    .\Conciliacion-Loop.ps1 -DesdeCarpetas
-    .\Conciliacion-Loop.ps1 -DesdeCarpetas -CarpetaLoop D:\loop -CarpetaDP D:\dp -CarpetaBS D:\bs
+    # Baja primero de Sybase y después concilia
+    .\Conciliacion-Loop.ps1 -Descargar
+    .\Conciliacion-Loop.ps1 -Fecha 26/10/2026 -FechaHasta 28/10/2026
 
 .EXAMPLE
     # Solo rearmar el dashboard general desde los HTML diarios existentes
@@ -61,12 +55,14 @@
 [CmdletBinding(DefaultParameterSetName = 'Conciliar')]
 param(
     # ---- CONFIGURACIÓN: completá estos valores una vez y no hace falta pasarlos al ejecutar ----
+    [string]$CarpetaLoop = (Join-Path $PSScriptRoot 'entrada_loop'),   # Movimientos_Loop*.csv
+    [string]$CarpetaDP = (Join-Path $PSScriptRoot 'entrada_DP'),       # Debitos_Pendientes*.csv
+    [string]$CarpetaBS = (Join-Path $PSScriptRoot 'entrada_bs'),       # Movimientos_BankService*.csv
     [string]$Server = 'aconquija1',                       # Servidor Sybase (o usar -Dsn / -ConnectionString)
     [int]$Port = 5000,
     [string]$Dsn = '',                          # DSN ODBC, si se prefiere en lugar de Server
     [string]$Driver = 'Adaptive Server Enterprise',
     [string]$Usuario = 'SRV_CONCILIACIONES',                      # Usuario de Sybase; la clave se pide en una ventana emergente
-    [string]$TransferenciasPath = (Join-Path (Get-Location).Path 'Movimientos_BankService.csv'),
     [string]$LoopBasePath = '',                 # CSV base de Loop (opcional)
     [string]$OutputDir = (Join-Path $PSScriptRoot 'salida'),   # Carpeta de salida fija (junto al script)
     # ---- Opcionales ----
@@ -75,11 +71,7 @@ param(
     [string]$Fecha,
     [string]$FechaHasta,
     [int]$Timeout = 300,
-    [string]$DescargaDir,
-    [switch]$DesdeCarpetas,                     # No descarga: lee los archivos de las tres carpetas de abajo
-    [string]$CarpetaLoop = (Join-Path $PSScriptRoot 'entrada_loop'),   # Movimientos_Loop*.csv
-    [string]$CarpetaDP = (Join-Path $PSScriptRoot 'entrada_DP'),       # Debitos_Pendientes*.csv
-    [string]$CarpetaBS = (Join-Path $PSScriptRoot 'entrada_bs'),       # Movimientos_BankService*.csv
+    [switch]$Descargar,                         # Baja primero de Sybase (si no, solo levanta las carpetas de entrada)
     [switch]$IncluirPeriodo,
     [Parameter(Mandatory = $true, ParameterSetName = 'General')][switch]$SoloGeneral
 )
@@ -1484,7 +1476,7 @@ function Get-MotivoNoHabil {
 function Invoke-Descarga {
     # Baja de Sybase (solo lectura) todos los débitos pendientes y los movimientos de Loop del período a CSV.
     # Fechas: desde el último día hábil anterior hasta ayer (lunes: desde el viernes). No se ejecuta en fines de semana ni feriados.
-    param([string]$Carpeta, $FechaDia, $FechaFin, [string]$Dsn, [string]$ConnectionString, [string]$Server, [int]$Port, [string]$Driver, [string]$Usuario, $Credencial, [int]$TimeoutSeg)
+    param([string]$CarpetaLoop, [string]$CarpetaDP, $FechaDia, $FechaFin, [string]$Dsn, [string]$ConnectionString, [string]$Server, [int]$Port, [string]$Driver, [string]$Usuario, $Credencial, [int]$TimeoutSeg)
     if ($null -ne $FechaDia) {
         $desde = ([datetime]$FechaDia).Date
         $hasta = $desde.AddDays(1)
@@ -1554,11 +1546,11 @@ order by a.comnro
     }
     else { $cs = $ConnectionString }
 
-    if (-not (Test-Path -LiteralPath $Carpeta)) { $null = New-Item -ItemType Directory -Path $Carpeta -Force }
+    foreach ($c in @($CarpetaLoop, $CarpetaDP)) { if (-not (Test-Path -LiteralPath $c)) { $null = New-Item -ItemType Directory -Path $c -Force } }
     # Archivos bajados con la fecha de la corrida en el nombre (queda el historial)
     $sufijo = (Get-Date).ToString('yyyyMMdd', $script:Inv)
-    $rutaPend = Join-Path $Carpeta "Debitos_Pendientes_$sufijo.csv"
-    $rutaLoop = Join-Path $Carpeta "Movimientos_Loop_$sufijo.csv"
+    $rutaPend = Join-Path $CarpetaDP "Debitos_Pendientes_$sufijo.csv"
+    $rutaLoop = Join-Path $CarpetaLoop "Movimientos_Loop_$sufijo.csv"
 
     Write-Log "Paso 1: conectando a Sybase (débitos pendientes: todos; movimientos de Loop: $diaTxt)..."
     $conn = New-Object System.Data.Odbc.OdbcConnection($cs)
@@ -1651,16 +1643,8 @@ try {
         exit 0
     }
     if (-not (Test-Path -LiteralPath $OutputDir)) { $null = New-Item -ItemType Directory -Path $OutputDir -Force }
-    if ($DesdeCarpetas) {
-        $datos = Read-Carpeta -CarpetaLoop $CarpetaLoop -CarpetaDP $CarpetaDP -CarpetaBS $CarpetaBS
-        $loop = $datos.Loop; $pend = $datos.Pendientes; $trans = $datos.Transferencias
-        $base = $null
-        if ($LoopBasePath) { $base = Read-Loop -Path $LoopBasePath }
-        Write-Log 'Inicio de la conciliación (archivos de las carpetas de entrada).'
-        $loopFinal = Merge-Loop -Loop $loop -Base $base
-    }
-    else {
-        if (-not $DescargaDir) { $DescargaDir = Join-Path (Resolve-Path -LiteralPath $OutputDir).Path 'Entrada' }
+    if ($Fecha) { $Descargar = [System.Management.Automation.SwitchParameter]::new($true) }
+    if ($Descargar) {
         $fechaDia = $null; $fechaFin = $null
         $fmtsFecha = @('dd/MM/yyyy', 'd/M/yyyy', 'yyyy-MM-dd')
         if ($Fecha) {
@@ -1672,19 +1656,17 @@ try {
             $fechaFin = Convert-Fecha $FechaHasta $fmtsFecha
             if ($null -eq $fechaFin) { throw "FechaHasta inválida '$FechaHasta' (use dd/MM/yyyy o yyyy-MM-dd)." }
         }
-        $bajados = Invoke-Descarga -Carpeta $DescargaDir -FechaDia $fechaDia -FechaFin $fechaFin -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
+        $bajados = Invoke-Descarga -CarpetaLoop $CarpetaLoop -CarpetaDP $CarpetaDP -FechaDia $fechaDia -FechaFin $fechaFin -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
         if ($null -eq $bajados) { exit 0 }
-        $LoopPath = $bajados.Loop
-        $PendientesPath = $bajados.Pendientes
-        Write-Log 'Paso 2: conciliación.'
-        Write-Log 'Inicio de la conciliación.'
-        $loop = Read-Loop -Path $LoopPath
-        $base = $null
-        if ($LoopBasePath) { $base = Read-Loop -Path $LoopBasePath }
-        $loopFinal = Merge-Loop -Loop $loop -Base $base
-        $pend = Read-Pendientes -Path $PendientesPath
-        $trans = Read-Transferencias -Path $TransferenciasPath
+        Write-Log 'Paso 2: conciliación con los archivos de las carpetas de entrada.'
     }
+    elseif ($FechaHasta) { throw '-FechaHasta requiere -Fecha.' }
+    $datos = Read-Carpeta -CarpetaLoop $CarpetaLoop -CarpetaDP $CarpetaDP -CarpetaBS $CarpetaBS
+    $loop = $datos.Loop; $pend = $datos.Pendientes; $trans = $datos.Transferencias
+    $base = $null
+    if ($LoopBasePath) { $base = Read-Loop -Path $LoopBasePath }
+    Write-Log 'Inicio de la conciliación.'
+    $loopFinal = Merge-Loop -Loop $loop -Base $base
 
     $conc = Get-Conciliacion -Loop $loopFinal -Pendientes $pend -Transfers $trans
     $exc = Get-Excepciones -Conc $conc
