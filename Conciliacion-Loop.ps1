@@ -9,43 +9,23 @@
       - entrada_loop : todos los Movimientos_Loop*.csv (si dos traen el mismo día, vale el más nuevo).
       - entrada_DP   : el Debitos_Pendientes*.csv más reciente.
       - entrada_bs   : todos los Movimientos_BankService*.csv.
-    Con -Descargar (o -Fecha) primero baja de Sybase los débitos pendientes (todos) y los movimientos de Loop
-    (desde el último día hábil anterior hasta ayer; lunes: desde el viernes; no se ejecuta en fines de semana
-    ni feriados, lista 2026 en $script:Feriados) y los guarda con la fecha en el nombre en entrada_DP y
-    entrada_loop; después concilia con lo que hay en las carpetas.
+    Los archivos de Loop y de débitos pendientes los baja de Sybase el script Descargar-Sybase.ps1.
     Salidas en <OutputDir> (por defecto, 'salida' junto al script): Diario\Conciliacion_Loop_<yyyyMMdd>.xlsx/.html
     y Conciliacion_Loop_General.html (dashboard general, se arma leyendo los HTML diarios).
     Código de salida: 0 si no hubo excepciones de ejecución, 1 si las hubo.
     No se vuelcan nombres, CUIT ni CBU en las salidas.
-    Los valores fijos (carpetas, Server, Usuario, etc.) se configuran en el bloque CONFIGURACIÓN del param.
+    Los valores fijos (carpetas, etc.) se configuran en el bloque CONFIGURACIÓN del param.
 
-.PARAMETER Descargar           Baja primero de Sybase (clave en una ventana emergente) y después concilia.
-.PARAMETER Fecha               Día puntual a bajar (dd/MM/yyyy o yyyy-MM-dd); implica -Descargar.
-.PARAMETER FechaHasta          Con -Fecha, último día del rango a bajar (por defecto, el mismo día).
 .PARAMETER CarpetaLoop         Carpeta de los Loop (por defecto, 'entrada_loop' junto al script).
 .PARAMETER CarpetaDP           Carpeta de los débitos pendientes (por defecto, 'entrada_DP' junto al script).
 .PARAMETER CarpetaBS           Carpeta de las transferencias BankService (por defecto, 'entrada_bs' junto al script).
 .PARAMETER LoopBasePath        CSV base de Loop para completar el período anterior (opcional).
 .PARAMETER OutputDir           Carpeta de salida (por defecto, 'salida' junto al script).
-.PARAMETER Server              (con -Descargar) Servidor ASE (o -Dsn / -ConnectionString).
-.PARAMETER Usuario             (con -Descargar) Usuario de Sybase.
-.PARAMETER Dsn                 (con -Descargar) DSN ODBC de Sybase.
-.PARAMETER Port                (con -Descargar) Puerto ASE (por defecto 5000).
-.PARAMETER Driver              (con -Descargar) Driver ODBC (por defecto 'Adaptive Server Enterprise').
-.PARAMETER ConnectionString    (con -Descargar) Cadena de conexión ODBC completa.
-.PARAMETER Credencial          (con -Descargar) Credencial ya armada (evita la ventana).
-.PARAMETER Timeout             (con -Descargar) Segundos máximos por consulta (por defecto 300).
 .PARAMETER IncluirPeriodo      Genera además el Excel y el HTML de todo el período.
 .PARAMETER SoloGeneral         Solo reconstruye el dashboard general desde los HTML diarios existentes.
 
 .EXAMPLE
-    # Normal: levanta los archivos de entrada_loop, entrada_DP y entrada_bs
     .\Conciliacion-Loop.ps1
-
-.EXAMPLE
-    # Baja primero de Sybase y después concilia
-    .\Conciliacion-Loop.ps1 -Descargar
-    .\Conciliacion-Loop.ps1 -Fecha 26/10/2026 -FechaHasta 28/10/2026
 
 .EXAMPLE
     # Solo rearmar el dashboard general desde los HTML diarios existentes
@@ -58,20 +38,9 @@ param(
     [string]$CarpetaLoop = (Join-Path $PSScriptRoot 'entrada_loop'),   # Movimientos_Loop*.csv
     [string]$CarpetaDP = (Join-Path $PSScriptRoot 'entrada_DP'),       # Debitos_Pendientes*.csv
     [string]$CarpetaBS = (Join-Path $PSScriptRoot 'entrada_bs'),       # Movimientos_BankService*.csv
-    [string]$Server = 'aconquija1',                       # Servidor Sybase (o usar -Dsn / -ConnectionString)
-    [int]$Port = 5000,
-    [string]$Dsn = '',                          # DSN ODBC, si se prefiere en lugar de Server
-    [string]$Driver = 'Adaptive Server Enterprise',
-    [string]$Usuario = 'SRV_CONCILIACIONES',                      # Usuario de Sybase; la clave se pide en una ventana emergente
     [string]$LoopBasePath = '',                 # CSV base de Loop (opcional)
     [string]$OutputDir = (Join-Path $PSScriptRoot 'salida'),   # Carpeta de salida fija (junto al script)
     # ---- Opcionales ----
-    [string]$ConnectionString,
-    [System.Management.Automation.PSCredential]$Credencial,
-    [string]$Fecha,
-    [string]$FechaHasta,
-    [int]$Timeout = 300,
-    [switch]$Descargar,                         # Baja primero de Sybase (si no, solo levanta las carpetas de entrada)
     [switch]$IncluirPeriodo,
     [Parameter(Mandatory = $true, ParameterSetName = 'General')][switch]$SoloGeneral
 )
@@ -86,19 +55,6 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding 
 # ---------------------------------------------------------------------------
 $script:Inv = [System.Globalization.CultureInfo]::InvariantCulture
 $script:Tol = [decimal]0.005
-# Feriados y días no laborables 2026: la descarga no se ejecuta esos días (ni sábados y domingos)
-$script:Feriados = @{
-    '2026-01-01' = 'Año nuevo'; '2026-02-16' = 'Carnaval'; '2026-02-17' = 'Carnaval'
-    '2026-03-23' = 'Día no laborable con fines turísticos'; '2026-03-24' = 'Día Nacional de la Memoria por la Verdad y la Justicia'
-    '2026-04-02' = 'Día del Veterano y de los Caídos en la Guerra de Malvinas y Jueves Santo'; '2026-04-03' = 'Viernes Santo'
-    '2026-05-01' = 'Día del Trabajador'; '2026-05-25' = 'Día de la Revolución de Mayo'
-    '2026-06-15' = 'Paso a la Inmortalidad del Gral. Güemes'; '2026-07-09' = 'Día de la Independencia'
-    '2026-07-10' = 'Día no laborable con fines turísticos'; '2026-08-17' = 'Paso a la Inmortalidad del Gral. San Martín'
-    '2026-10-12' = 'Día de la Raza'; '2026-11-09' = 'Feriado nacional por la visita de Su Santidad el Papa León XIV'
-    '2026-11-10' = 'Feriado bancario por la visita de Su Santidad el Papa León XIV'; '2026-11-23' = 'Día de la Soberanía Nacional'
-    '2026-12-07' = 'Día no laborable con fines turísticos'; '2026-12-08' = 'Día de la Inmaculada Concepción de María'
-    '2026-12-25' = 'Navidad'
-}
 $script:NfAR = New-Object System.Globalization.NumberFormatInfo
 $script:NfAR.NumberDecimalSeparator = ','
 $script:NfAR.NumberGroupSeparator = '.'
@@ -1368,205 +1324,6 @@ render();
     return $ruta
 }
 
-# ---------------------------------------------------------------------------
-# Descarga desde Sybase (paso 1 del modo todo en uno)
-# ---------------------------------------------------------------------------
-function Format-CampoCsv {
-    # Valor en texto invariante, sin saltos de línea y con comillas si hace falta
-    param($Valor)
-    if ($null -eq $Valor -or $Valor -is [System.DBNull]) { return '' }
-    if ($Valor -is [datetime]) { $t = $Valor.ToString('d/M/yyyy HH:mm:ss.fff', $script:Inv) }
-    elseif ($Valor -is [decimal] -or $Valor -is [double] -or $Valor -is [single]) { $t = ([System.IFormattable]$Valor).ToString($null, $script:Inv) }
-    elseif ($Valor -is [byte[]]) { $t = '' }
-    else { $t = [string]$Valor }
-    $t = ($t -replace '[\r\n]+', ' ').Trim()
-    if ($t.IndexOfAny([char[]]@(',', '"')) -ge 0) { $t = '"' + $t.Replace('"', '""') + '"' }
-    return $t
-}
-
-function Read-CredencialPopup {
-    # Ventana emergente para pedir usuario y clave (la clave se muestra oculta)
-    param([string]$Titulo = 'Conexión a Sybase', [string]$Usuario)
-    try {
-        Add-Type -AssemblyName System.Windows.Forms
-        Add-Type -AssemblyName System.Drawing
-    }
-    catch { return Get-Credential -Message $Titulo }
-    [System.Windows.Forms.Application]::EnableVisualStyles()
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = $Titulo
-    $f.StartPosition = 'CenterScreen'
-    $f.FormBorderStyle = 'FixedDialog'
-    $f.MaximizeBox = $false
-    $f.MinimizeBox = $false
-    $f.TopMost = $true
-    $f.ClientSize = New-Object System.Drawing.Size(330, 140)
-    $lu = New-Object System.Windows.Forms.Label
-    $lu.Text = 'Usuario:'; $lu.Location = New-Object System.Drawing.Point(15, 20); $lu.AutoSize = $true
-    $tu = New-Object System.Windows.Forms.TextBox
-    $tu.Location = New-Object System.Drawing.Point(90, 17); $tu.Size = New-Object System.Drawing.Size(220, 22)
-    if ($Usuario) { $tu.Text = $Usuario; $tu.ReadOnly = $true; $tu.TabStop = $false }
-    $lp = New-Object System.Windows.Forms.Label
-    $lp.Text = 'Clave:'; $lp.Location = New-Object System.Drawing.Point(15, 58); $lp.AutoSize = $true
-    $tp = New-Object System.Windows.Forms.TextBox
-    $tp.Location = New-Object System.Drawing.Point(90, 55); $tp.Size = New-Object System.Drawing.Size(220, 22)
-    $tp.UseSystemPasswordChar = $true
-    $ok = New-Object System.Windows.Forms.Button
-    $ok.Text = 'Aceptar'; $ok.Location = New-Object System.Drawing.Point(150, 98); $ok.Size = New-Object System.Drawing.Size(75, 28)
-    $ok.Add_Click({
-            if ($tu.Text.Trim() -eq '') { [void][System.Windows.Forms.MessageBox]::Show('Ingresá el usuario.', $Titulo) }
-            else { $f.DialogResult = [System.Windows.Forms.DialogResult]::OK; $f.Close() }
-        }.GetNewClosure())
-    $ca = New-Object System.Windows.Forms.Button
-    $ca.Text = 'Cancelar'; $ca.Location = New-Object System.Drawing.Point(235, 98); $ca.Size = New-Object System.Drawing.Size(75, 28)
-    $ca.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $f.AcceptButton = $ok
-    $f.CancelButton = $ca
-    $f.Controls.AddRange(@($lu, $tu, $lp, $tp, $ok, $ca))
-    $f.Add_Shown({ $f.Activate(); if ($tu.ReadOnly) { $tp.Focus() } else { $tu.Focus() } }.GetNewClosure())
-    $res = $f.ShowDialog()
-    if ($res -ne [System.Windows.Forms.DialogResult]::OK) { $f.Dispose(); throw 'Conexión cancelada por el usuario.' }
-    $sec = New-Object System.Security.SecureString
-    foreach ($ch in $tp.Text.ToCharArray()) { $sec.AppendChar($ch) }
-    $sec.MakeReadOnly()
-    $usuario = $tu.Text.Trim()
-    $tp.Text = ''
-    $f.Dispose()
-    return (New-Object System.Management.Automation.PSCredential($usuario, $sec))
-}
-
-function Export-ConsultaCsv {
-    # Ejecuta una consulta (solo lectura) y la vuelca a un CSV; devuelve la cantidad de filas
-    param($Conexion, [string]$Sql, [string]$Ruta, [int]$TimeoutSeg)
-    $dir = Split-Path -Parent $Ruta
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
-    $cmd = $Conexion.CreateCommand()
-    $cmd.CommandText = $Sql
-    $cmd.CommandTimeout = $TimeoutSeg
-    $reader = $cmd.ExecuteReader()
-    $writer = New-Object System.IO.StreamWriter($Ruta, $false, (New-Object System.Text.UTF8Encoding($false)))
-    $filas = 0
-    try {
-        $n = $reader.FieldCount
-        if ($n -eq 0) { throw 'La consulta no devolvió columnas.' }
-        $cols = for ($i = 0; $i -lt $n; $i++) { $reader.GetName($i) }
-        $writer.Write(($cols -join ',') + "`r`n")
-        while ($reader.Read()) {
-            $campos = for ($i = 0; $i -lt $n; $i++) { Format-CampoCsv $reader.GetValue($i) }
-            $writer.Write(($campos -join ',') + "`r`n")
-            $filas++
-        }
-    }
-    finally {
-        $writer.Dispose()
-        $reader.Dispose()
-    }
-    return $filas
-}
-
-function Get-MotivoNoHabil {
-    # Devuelve el motivo si la fecha es fin de semana o feriado; $null si es día hábil
-    param([datetime]$Dia)
-    if ($Dia.DayOfWeek -eq [System.DayOfWeek]::Saturday -or $Dia.DayOfWeek -eq [System.DayOfWeek]::Sunday) { return 'fin de semana' }
-    $k = $Dia.ToString('yyyy-MM-dd', $script:Inv)
-    if ($script:Feriados.ContainsKey($k)) { return 'feriado: ' + $script:Feriados[$k] }
-    return $null
-}
-
-function Invoke-Descarga {
-    # Baja de Sybase (solo lectura) todos los débitos pendientes y los movimientos de Loop del período a CSV.
-    # Fechas: desde el último día hábil anterior hasta ayer (lunes: desde el viernes). No se ejecuta en fines de semana ni feriados.
-    param([string]$CarpetaLoop, [string]$CarpetaDP, $FechaDia, $FechaFin, [string]$Dsn, [string]$ConnectionString, [string]$Server, [int]$Port, [string]$Driver, [string]$Usuario, $Credencial, [int]$TimeoutSeg)
-    if ($null -ne $FechaDia) {
-        $desde = ([datetime]$FechaDia).Date
-        $hasta = $desde.AddDays(1)
-        if ($null -ne $FechaFin) {
-            $fin = ([datetime]$FechaFin).Date
-            if ($fin -lt $desde) { throw 'FechaHasta no puede ser anterior a Fecha.' }
-            $hasta = $fin.AddDays(1)
-        }
-    }
-    else {
-        $hasta = (Get-Date).Date
-        if ($hasta.Year -ne 2026) { Write-Log "La lista de feriados del script es de 2026; actualizala para $($hasta.Year)." 'WARN' }
-        $motivo = Get-MotivoNoHabil $hasta
-        if ($motivo) {
-            Write-Log "Hoy no es día hábil ($motivo): no se ejecuta (use -Fecha para forzar un día)." 'WARN'
-            return $null
-        }
-        # Desde el último día hábil anterior: cubre fines de semana y feriados intermedios (lunes = viernes, @ayer = @hoy - 3)
-        $desde = $hasta.AddDays(-1)
-        while (Get-MotivoNoHabil $desde) { $desde = $desde.AddDays(-1) }
-    }
-    $ultimo = $hasta.AddDays(-1)
-    if ($desde -eq $ultimo) { $diaTxt = Format-Fecha $desde }
-    else { $diaTxt = 'del {0} al {1}' -f (Format-Fecha $desde), (Format-Fecha $ultimo) }
-    $fechasSql = "declare @hoy datetime, @ayer datetime`r`nselect @hoy  = '{0}'`r`nselect @ayer = '{1}'`r`n" -f $hasta.ToString('yyyyMMdd', $script:Inv), $desde.ToString('yyyyMMdd', $script:Inv)
-
-    # Débitos pendientes: se consultan todos (sin filtro de fecha)
-    $sqlPendientes = @"
-select b.fecreal, b.tercod, b.succod, b.sistcod, b.moncod, b.cuecod, movcod, descdet, b.fecproceso, b.comnro, b.nromen, m.mentexto, b.importedeb, fecenlace, fecorigen
-From Banksys..tgl_deb_pendientes b
-inner join Banksys..tgt_transaccion a on b.paiscod = a.paiscod and
-b.bcocod = a.bcocod and
-b.sistcod = a.sistcod and
-b.trancod = a.trancod
-left outer join Banksys..tdoc_mensages m on b.nromen = m.nromen
-Where
-b.paiscod = 54 and
-b.bcocod = 312 and
-b.succod = 1 and
-a.tipofunc in (0,1)
-and a.movcod in (25030, 25031)
-
-order by b.fecorigen, b.fecreal, b.fecenlace, b.cuecod
-"@
-
-    $sqlLoop = $fechasSql + @"
-
-select  a.sistcod, a.moncod, a.cuecod, convert(varchar, a.fecmov, 103) 'Fecha_Mov', a.comnro, a.movcod, b.signo, b.accimp, b.signo * b.accimp 'Importe'
-from tgl_movimientos a, tgl_movimientos_aper b
-where
-a.fecmov >= @ayer
-and a.fecmov <  @hoy
-and a.concod = ' '
-and a.fecreal = b.fecreal
-and a.tercod = b.tercod
-and b.funcod = 1
-and a.movcod in (25030, 25031)
-order by a.comnro
-"@
-
-    if (-not $ConnectionString) {
-        if ($Dsn) { $cs = "DSN=$Dsn;" }
-        elseif ($Server) { $cs = "Driver={$Driver};Server=$Server;Port=$Port;" }
-        else { throw 'Falta la conexión a Sybase: completá Server (o Dsn) en el bloque CONFIGURACIÓN al inicio del script, o pasá -Server / -Dsn / -ConnectionString.' }
-        if ($null -eq $Credencial) { $Credencial = Read-CredencialPopup -Titulo 'Conexión a Sybase' -Usuario $Usuario }
-        $cs += 'UID={0};PWD={1};' -f $Credencial.UserName, $Credencial.GetNetworkCredential().Password
-    }
-    else { $cs = $ConnectionString }
-
-    foreach ($c in @($CarpetaLoop, $CarpetaDP)) { if (-not (Test-Path -LiteralPath $c)) { $null = New-Item -ItemType Directory -Path $c -Force } }
-    # Archivos bajados con la fecha de la corrida en el nombre (queda el historial)
-    $sufijo = (Get-Date).ToString('yyyyMMdd', $script:Inv)
-    $rutaPend = Join-Path $CarpetaDP "Debitos_Pendientes_$sufijo.csv"
-    $rutaLoop = Join-Path $CarpetaLoop "Movimientos_Loop_$sufijo.csv"
-
-    Write-Log "Paso 1: conectando a Sybase (débitos pendientes: todos; movimientos de Loop: $diaTxt)..."
-    $conn = New-Object System.Data.Odbc.OdbcConnection($cs)
-    try {
-        $conn.Open()
-        $f1 = Export-ConsultaCsv -Conexion $conn -Sql $sqlPendientes -Ruta $rutaPend -TimeoutSeg $TimeoutSeg
-        if ($f1 -eq 0) { Write-Log 'Débitos pendientes: sin filas (CSV solo con el encabezado).' 'WARN' }
-        Write-Log ('Débitos pendientes: {0} fila(s) en {1}' -f $f1, $rutaPend) 'OK'
-        $f2 = Export-ConsultaCsv -Conexion $conn -Sql $sqlLoop -Ruta $rutaLoop -TimeoutSeg $TimeoutSeg
-        if ($f2 -eq 0) { Write-Log 'Movimientos de Loop: sin filas (CSV solo con el encabezado).' 'WARN' }
-        Write-Log ('Movimientos de Loop: {0} fila(s) en {1}' -f $f2, $rutaLoop) 'OK'
-    }
-    finally { $conn.Dispose() }
-    return [pscustomobject]@{ Loop = $rutaLoop; Pendientes = $rutaPend }
-}
-
 function Get-ArchivosCsv {
     # CSV de una carpeta por patrón de nombre; si ninguno coincide, usa todos los .csv de la carpeta
     param([string]$Carpeta, [string]$Patron, [string]$Rotulo)
@@ -1643,24 +1400,6 @@ try {
         exit 0
     }
     if (-not (Test-Path -LiteralPath $OutputDir)) { $null = New-Item -ItemType Directory -Path $OutputDir -Force }
-    if ($Fecha) { $Descargar = [System.Management.Automation.SwitchParameter]::new($true) }
-    if ($Descargar) {
-        $fechaDia = $null; $fechaFin = $null
-        $fmtsFecha = @('dd/MM/yyyy', 'd/M/yyyy', 'yyyy-MM-dd')
-        if ($Fecha) {
-            $fechaDia = Convert-Fecha $Fecha $fmtsFecha
-            if ($null -eq $fechaDia) { throw "Fecha inválida '$Fecha' (use dd/MM/yyyy o yyyy-MM-dd)." }
-        }
-        if ($FechaHasta) {
-            if (-not $Fecha) { throw '-FechaHasta requiere -Fecha.' }
-            $fechaFin = Convert-Fecha $FechaHasta $fmtsFecha
-            if ($null -eq $fechaFin) { throw "FechaHasta inválida '$FechaHasta' (use dd/MM/yyyy o yyyy-MM-dd)." }
-        }
-        $bajados = Invoke-Descarga -CarpetaLoop $CarpetaLoop -CarpetaDP $CarpetaDP -FechaDia $fechaDia -FechaFin $fechaFin -Dsn $Dsn -ConnectionString $ConnectionString -Server $Server -Port $Port -Driver $Driver -Usuario $Usuario -Credencial $Credencial -TimeoutSeg $Timeout
-        if ($null -eq $bajados) { exit 0 }
-        Write-Log 'Paso 2: conciliación con los archivos de las carpetas de entrada.'
-    }
-    elseif ($FechaHasta) { throw '-FechaHasta requiere -Fecha.' }
     $datos = Read-Carpeta -CarpetaLoop $CarpetaLoop -CarpetaDP $CarpetaDP -CarpetaBS $CarpetaBS
     $loop = $datos.Loop; $pend = $datos.Pendientes; $trans = $datos.Transferencias
     $base = $null
