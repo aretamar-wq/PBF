@@ -1029,16 +1029,21 @@ function Export-HtmlDashboard {
     & $ap (New-SvgBarras $Conc)
     & $ap '</div>'
 
-    & $ap '<h2>Saldo de débitos pendientes por día</h2><div class="card scroll">'
-    & $ap '<table><thead><tr><th>Fecha del crédito</th><th class="n">Comprobantes $</th><th class="n">Pesos</th><th class="n">Acumulado $</th><th class="n">Comprobantes US$</th><th class="n">USD</th><th class="n">Acumulado US$</th></tr></thead><tbody>'
-    $sumCp = 0; $sumCu = 0; $sumP = [decimal]0; $sumU = [decimal]0
-    foreach ($d in $PendDia) {
-        $sumCp += $d.CantPesos; $sumCu += $d.CantUsd; $sumP += $d.Pesos; $sumU += $d.Usd
-        $imp = { param($v, $m, $c) if ($c -eq 0) { '' } else { Get-Enc (Format-Importe $v $m) } }
-        & $ap ('<tr><td>{0}</td><td class="n">{1}</td><td class="n">{2}</td><td class="n">{3}</td><td class="n">{4}</td><td class="n">{5}</td><td class="n">{6}</td></tr>' -f
-            (Get-Enc (Format-Fecha $d.Fecha)), $d.CantPesos, (& $imp $d.Pesos 0 $d.CantPesos), (Get-Enc (Format-Importe $d.AcumPesos 0)), $d.CantUsd, (& $imp $d.Usd 2 $d.CantUsd), (Get-Enc (Format-Importe $d.AcumUsd 2)))
+    if ($PendDia.Count -eq 0) {
+        & $ap '<h2>Saldo de débitos pendientes por día</h2><div class="card"><p class="muted">Sin débitos pendientes.</p></div>'
     }
-    & $ap ('</tbody><tfoot><tr><td>Total</td><td class="n">{0}</td><td class="n">{1}</td><td class="n"></td><td class="n">{2}</td><td class="n">{3}</td><td class="n"></td></tr></tfoot></table></div>' -f $sumCp, (Get-Enc (Format-Importe $sumP 0)), $sumCu, (Get-Enc (Format-Importe $sumU 2)))
+    else {
+        & $ap '<h2>Saldo de débitos pendientes por día</h2><div class="card scroll">'
+        & $ap '<table><thead><tr><th>Fecha del crédito</th><th class="n">Comprobantes $</th><th class="n">Pesos</th><th class="n">Acumulado $</th><th class="n">Comprobantes US$</th><th class="n">USD</th><th class="n">Acumulado US$</th></tr></thead><tbody>'
+        $sumCp = 0; $sumCu = 0; $sumP = [decimal]0; $sumU = [decimal]0
+        foreach ($d in $PendDia) {
+            $sumCp += $d.CantPesos; $sumCu += $d.CantUsd; $sumP += $d.Pesos; $sumU += $d.Usd
+            $imp = { param($v, $m, $c) if ($c -eq 0) { '' } else { Get-Enc (Format-Importe $v $m) } }
+            & $ap ('<tr><td>{0}</td><td class="n">{1}</td><td class="n">{2}</td><td class="n">{3}</td><td class="n">{4}</td><td class="n">{5}</td><td class="n">{6}</td></tr>' -f
+                (Get-Enc (Format-Fecha $d.Fecha)), $d.CantPesos, (& $imp $d.Pesos 0 $d.CantPesos), (Get-Enc (Format-Importe $d.AcumPesos 0)), $d.CantUsd, (& $imp $d.Usd 2 $d.CantUsd), (Get-Enc (Format-Importe $d.AcumUsd 2)))
+        }
+        & $ap ('</tbody><tfoot><tr><td>Total</td><td class="n">{0}</td><td class="n">{1}</td><td class="n"></td><td class="n">{2}</td><td class="n">{3}</td><td class="n"></td></tr></tfoot></table></div>' -f $sumCp, (Get-Enc (Format-Importe $sumP 0)), $sumCu, (Get-Enc (Format-Importe $sumU 2)))
+    }
 
     & $ap '<h2>Excepciones a revisar</h2><div class="card">'
     if ($excs.Count -eq 0) { & $ap '<p>Sin excepciones.</p>' }
@@ -1299,9 +1304,11 @@ function render(){
     ['APPROVED pendientes de contabilizar',s.approvedPend,false,'No son excepción'],['APPROVED fuera del período',s.approvedFuera,false],['Otros estados sin registro',s.otros,false,'Ej. PENDING_EXECUTION; no son excepción']]);
   chart();
   var aP=0,aU=0,cP=0,cU=0,tP=0,tU=0;
-  var filas=sel.map(function(x){var p=x.datos.pendDia;aP+=num(p.pesos);aU+=num(p.usd);cP+=p.cantP||0;cU+=p.cantU||0;
+  var conSaldo=sel.filter(function(x){var p=x.datos.pendDia;return (p.cantP||0)>0||(p.cantU||0)>0;});
+  var filas=conSaldo.map(function(x){var p=x.datos.pendDia;aP+=num(p.pesos);aU+=num(p.usd);cP+=p.cantP||0;cU+=p.cantU||0;
     return [fdate(x.datos.fecha),p.cantP||0,p.cantP?money(num(p.pesos)):'',money(aP),p.cantU||0,p.cantU?money(num(p.usd),true):'',money(aU,true)];});
-  tabla(el('saldo'),[['Fecha del crédito'],['Comprobantes $','n'],['Pesos','n'],['Acumulado $','n'],['Comprobantes US$','n'],['USD','n'],['Acumulado US$','n']],filas,
+  if(!filas.length){var ts=el('saldo');ts.innerHTML='';ts.appendChild(mk('caption','Sin débitos pendientes en el rango elegido.'));}
+  else tabla(el('saldo'),[['Fecha del crédito'],['Comprobantes $','n'],['Pesos','n'],['Acumulado $','n'],['Comprobantes US$','n'],['USD','n'],['Acumulado US$','n']],filas,
     ['Total',cP,money(aP),'',cU,money(aU,true),'']);
   tabla(el('dias'),[['Día'],['Correctos','n'],['Débito pendiente','n'],['Una partida','n'],['Importes distintos','n'],['Excepciones','n'],['Sin cubrir $','n'],['Sin cubrir US$','n'],['HTML'],['Excel']],
     sel.map(function(x){var o=x.datos,m=o.marcas;return [fdate(o.fecha),m.ok||0,(m.pend||0)+(m.pendDist||0),m.una||0,m.dist||0,(o.exc||[]).length,money(num(o.pesos.neto)-num(o.pesos.pend)),money(num(o.usd.neto)-num(o.usd.pend),true),
